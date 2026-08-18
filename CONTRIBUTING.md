@@ -364,6 +364,22 @@ tool environments whose pins are deliberately incompatible, and anything it
 pulled in would have to be satisfiable by all of them at once — which is the
 constraint this repository exists to remove.
 
+### A path dependency is installed as a COPY, not a link
+
+`sadt-areg-common = { path = "../common" }` installs a snapshot. Editing
+`common/src/.../pairing.py` changes nothing in a tool's virtualenv until:
+
+```bash
+uv sync --reinstall-package sadt-areg-common
+```
+
+Without it you edit, re-run, and see the OLD behaviour — which reads as "my fix
+did not work" and sends you rewriting a correct patch. It cost a cycle the first
+time it came up. `editable = true` avoids it, and is why the dev-only
+`sadt-testkit` entries carry it; a shared runtime package deliberately does not,
+so what a tool runs against is a fixed copy rather than whatever the working
+tree happens to hold.
+
 ### A `sup.run()` call must live in the tool's own `src/`
 
 Never in a shared package, however much orchestration two tools appear to have

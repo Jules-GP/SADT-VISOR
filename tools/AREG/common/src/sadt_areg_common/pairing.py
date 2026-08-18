@@ -51,6 +51,48 @@ def is_scan_file(filename: str) -> bool:
     return filename.lower().endswith(SCAN_EXTENSIONS)
 
 
+def _split_jaw_timepoint(part: str) -> list:
+    """`UpperT1` -> `['Upper', 'T1']`. One token in, one or two out.
+
+    Upstream's own AREG test set is named `A2_UpperT1.vtk` / `A2_UpperT2.vtk`:
+    the jaw and the timepoint run together with no separator, so the whole thing
+    is a single token, `uppert1`, matching neither the jaw table nor the
+    timepoint one. Two consequences, both silent until a run failed:
+    `patient_stem` dropped nothing and made the two timepoints two patients, and
+    `jaw_of` found no jaw at all.
+
+    Deliberately narrow, and keyed on the two STATIC tables rather than on what
+    a caller asked to drop: the split fires only when the prefix is a known jaw
+    token AND the suffix is a known timepoint. `PAT1` is therefore untouched
+    (`pa` is not a jaw), and so is any identifier that merely ends in something
+    timepoint-shaped. Splitting on every camelCase boundary would start eating
+    patient identifiers, which is the failure this module exists to prevent.
+    """
+    lowered = part.lower()
+    for timepoint in catalogs.TIMEPOINT_TOKENS:
+        if not lowered.endswith(timepoint) or len(lowered) <= len(timepoint):
+            continue
+        if lowered[: -len(timepoint)] in catalogs.JAW_TOKENS:
+            cut = len(lowered) - len(timepoint)
+            return [part[:cut], part[cut:]]
+    return [part]
+
+
+def split_parts(stem: str) -> list:
+    """`_SEPARATORS.split`, plus the concatenated jaw+timepoint split.
+
+    Separators AND their surroundings, so `_drop_tokens` can rebuild the stem
+    from what it keeps. `tokens()` is the same thing without the separators.
+    """
+    out = []
+    for part in _SEPARATORS.split(stem):
+        if part and not _SEPARATORS.fullmatch(part):
+            out.extend(_split_jaw_timepoint(part))
+        else:
+            out.append(part)
+    return out
+
+
 def tokens(stem: str) -> tuple:
     """The lowercase words of a file stem, split on _ - . and whitespace.
 
@@ -59,7 +101,7 @@ def tokens(stem: str) -> tuple:
     """
     return tuple(
         part.lower()
-        for part in _SEPARATORS.split(stem)
+        for part in split_parts(stem)
         if part and not _SEPARATORS.fullmatch(part)
     )
 
@@ -75,7 +117,7 @@ def _drop_tokens(stem: str, unwanted) -> str:
     Case is preserved for what survives: the key ends up in output paths, and a
     patient folder should keep the name its owner gave it.
     """
-    parts = _SEPARATORS.split(stem)
+    parts = split_parts(stem)
     kept = [
         part
         for part in parts

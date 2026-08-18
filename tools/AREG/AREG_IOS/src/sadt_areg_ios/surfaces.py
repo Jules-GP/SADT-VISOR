@@ -30,7 +30,7 @@ import numpy as np
 import vtk
 from vtk.util.numpy_support import vtk_to_numpy
 
-from sadt_areg_common import catalogs
+from sadt_areg_common import catalogs, pairing
 
 SURFACE_EXTENSIONS = (".vtk", ".vtp", ".stl", ".obj")
 
@@ -119,8 +119,12 @@ def jaw_of(filename: str) -> str:
     subject folder named `Mdx` made every mesh in it a mandible.
     """
     stem = os.path.splitext(os.path.basename(filename))[0]
-    for token in _SEPARATORS.split(stem):
-        jaw = catalogs.JAW_TOKENS.get(token.lower())
+    # `pairing.tokens` rather than a local split: it also separates a jaw run
+    # together with a timepoint, `UpperT1` -> `upper` + `t1`, which upstream's
+    # own test set is named with. A local split saw one token, `uppert1`, and
+    # reported no jaw at all.
+    for token in pairing.tokens(stem):
+        jaw = catalogs.JAW_TOKENS.get(token)
         if jaw:
             return jaw
     return None
