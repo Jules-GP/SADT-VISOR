@@ -1,0 +1,89 @@
+"""AREG_CBCT -- register a follow-up CBCT onto its baseline.
+
+elastix, rigid, restricted to the anatomy that has not changed between the two
+timepoints: the cranial base, the mandible or the maxilla, taken as masks.
+
+Split out of the former single `AREG`, which served both modalities from one
+schema and one virtualenv. The reason is the same as ALI's: the intraoral
+engine needs pytorch3d and therefore torch 2.11, this one needs neither, and
+while they shared an environment neither could be pinned without the other.
+They now share only `sadt_areg_common` -- the patient-key convention, the
+catalogs, and the scan-extension table -- which has no dependencies at all.
+
+The masks this registers on, and the orientation both timepoints must share,
+come from other tools reached through the supervisor; see the CBCT half of
+`tools.py`. `AREG_CBCT -> ASO -> ALI_CBCT` is the deepest chain in the family.
+"""
+
+from pathlib import Path
+from typing import Literal
+
+from .dispatch import main
+
+
+def run(
+    t1: Path,
+    t2: Path,
+    output_dir: Path,
+    automation: Literal[
+        "Semi-Automated", "Fully-Automated", "Oriented + Fully-Automated"
+    ] = "Fully-Automated",
+    # Spelled out because `Literal` takes literals only -- it cannot be built
+    # from catalogs.REGION_CHOICES. That makes this a second declaration of the
+    # same set, which is the thing this contract otherwise avoids, so a test
+    # asserts the two agree.
+    regions: list[
+        Literal["Cranial base", "Mandible", "Maxilla"]
+    ] = ["Cranial base"],
+    t1_masks: Path = "",
+    segmentation_model: Path = "",
+    segmentation_label: int = 0,
+    reference: Path = "",
+    landmark_model: Path = "",
+    dicom_input: bool = False,
+    output_suffix: str = "Reg",
+    *,
+    sup=None,
+) -> Path:
+    """Register a follow-up CBCT onto its baseline, so the two can be compared.
+
+    Args:
+        t1: The baseline scans -- one volume or a folder of them, searched
+            recursively. A DICOM series is converted when `dicom_input` is set.
+        t2: The follow-up scans, paired to T1 by patient key.
+        output_dir: Where the registered scans, their transforms and
+            `AREG_report.json` are written. Nothing is written outside it.
+        automation: Semi-Automated takes your own masks; Fully-Automated
+            segments them; Oriented + Fully-Automated orients both timepoints
+            first, which needs a reference.
+        regions: The anatomy to register on -- what has NOT changed between the
+            timepoints. The one argument a clinician must actually think about.
+        t1_masks: Semi-Automated only. Your own T1 segmentation masks.
+        segmentation_model: The mask model bundle, for the modes that segment.
+        segmentation_label: Which label value in the masks to register on.
+        reference: Oriented + Fully-Automated only. The orientation reference.
+        landmark_model: Oriented + Fully-Automated only. The landmark bundle the
+            orientation step predicts with.
+        dicom_input: The inputs are DICOM series rather than volumes.
+        output_suffix: Added to each output name, e.g. `scan_Reg.nii.gz`.
+
+    Returns:
+        The output directory.
+    """
+    # itk-elastix and SimpleITK are imported inside the engine: CI imports this
+    # module on every PR to publish the schema, and that must not cost them.
+    return main(
+        t1=t1,
+        t2=t2,
+        output_dir=output_dir,
+        automation=automation,
+        cbct_regions=regions,
+        t1_masks=t1_masks,
+        segmentation_model=segmentation_model,
+        segmentation_label=segmentation_label,
+        cbct_reference=reference,
+        landmark_model=landmark_model,
+        dicom_input=dicom_input,
+        output_suffix=output_suffix,
+        sup=sup,
+    )

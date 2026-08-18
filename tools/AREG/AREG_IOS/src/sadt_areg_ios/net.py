@@ -21,7 +21,7 @@ needs none of this.
 
 import logging
 
-from ..errors import ToolUnavailableError
+from sadt_areg_common.errors import ToolUnavailableError
 
 logger = logging.getLogger(__name__)
 

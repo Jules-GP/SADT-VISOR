@@ -30,7 +30,7 @@ import numpy as np
 import vtk
 from vtk.util.numpy_support import vtk_to_numpy
 
-from .. import catalogs
+from sadt_areg_common import catalogs
 
 SURFACE_EXTENSIONS = (".vtk", ".vtp", ".stl", ".obj")
 

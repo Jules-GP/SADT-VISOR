@@ -29,7 +29,7 @@ import os
 
 import SimpleITK as sitk
 
-from .. import catalogs, pairing
+from sadt_areg_common import catalogs, pairing
 from . import elastix
 
 logger = logging.getLogger(__name__)

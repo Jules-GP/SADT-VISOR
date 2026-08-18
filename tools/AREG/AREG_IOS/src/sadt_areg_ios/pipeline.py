@@ -28,7 +28,8 @@ reported rather than guessed.
 import logging
 import os
 
-from .. import catalogs, landmarks as landmark_files, pairing
+from sadt_areg_common import catalogs, pairing
+from . import landmarks as landmark_files
 from . import butterfly, icp, mgl, surfaces
 
 logger = logging.getLogger(__name__)

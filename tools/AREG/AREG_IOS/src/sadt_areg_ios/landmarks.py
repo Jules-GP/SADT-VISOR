@@ -23,7 +23,7 @@ import re
 
 import numpy as np
 
-from . import pairing
+from sadt_areg_common import pairing
 
 MARKUPS_EXTENSIONS = (".mrk.json", ".json")
 

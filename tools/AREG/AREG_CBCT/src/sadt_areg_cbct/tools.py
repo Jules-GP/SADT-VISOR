@@ -36,16 +36,13 @@ logger = logging.getLogger(__name__)
 # advice is the useful half: a caller who cannot run AMASSS can still send their
 # own masks, and saying so beats naming a deployment problem they cannot fix.
 _ADVICE = {
+    "AMASSS": (
+        "Send your own T1 segmentation masks in 't1_masks' and use Semi-Automated "
+        "mode instead."
+    ),
     "ASO": (
         "Orient the T1 and T2 scans yourself beforehand, and use the mode that takes "
         "them already oriented."
-    ),
-    "Crown_Seg": (
-        "Segment the crowns yourself -- the meshes need a per-point tooth-label array "
-        "-- and use Semi-Automated mode instead."
-    ),
-    "ALI_IOS": (
-        "Send the 13 mucogingival landmarks per lower scan in 'mgl_landmarks' instead."
     ),
 }
 
@@ -110,57 +107,29 @@ def orient_scans(sup, scan_dir: str, reference_path: str, modality: str,
     return _returned(sup.run("ASO", **parameters))
 
 
-def label_crowns(sup, mesh_dir: str, model_path: str = "") -> str:
-    """Label the crowns of every mesh under `mesh_dir`.
+def segment_masks(sup, scan_dir: str, model_path: str, mask_structures) -> str:
+    """Segment every scan under `scan_dir` into the requested mask structures.
 
-    `skip_segmented` is left at its default: a mesh already carrying a
-    tooth-label array passes through untouched, so a batch mixing segmented and
-    raw meshes costs network time only for the ones that need it. The original
-    did that by hand -- `__BypassCrownseg__` copied files into two directories
-    and merged them afterwards -- which is work that belongs inside the tool
-    doing the segmenting.
+    Returns the directory holding AMASSS's output, which `cbct.pipeline.find_masks`
+    then reads exactly as it reads a mask folder the caller sent -- the automated
+    and semi-automated paths differ only in where the masks came from.
+
+    `mask_structures` are AMASSS structure codes (CBMASK/MANDMASK/MAXMASK), and
+    the packaged tool takes codes directly. The in-process version had to
+    translate them into display names through AMASSS's own table; the schema
+    publishes the codes now, so the translation is gone rather than restated.
     """
-    logger.info("AREG: asking 'Crown_Seg' for tooth-labelled meshes")
-    parameters = {
-        "meshes": mesh_dir,
-        "output_dir": _output(sup, "Crown_Seg"),
-        "suffix": "Seg",
-    }
-    if model_path:
-        parameters["model"] = model_path
-    return _returned(sup.run("Crown_Seg", **parameters))
-
-
-def predict_mucogingival(sup, mesh_dir: str, model_path: str = "") -> str:
-    """Predict the 13 mucogingival landmarks on every lower arch under `mesh_dir`.
-
-    Returns the directory holding ALI's markups files, which `ios.mgl` then
-    reads exactly as it reads a folder the caller sent -- the two paths differ
-    only in where the landmarks came from.
-
-    `ios_networks` names Mucogingival ALONE. It is the one network ALI leaves
-    off by default, and asking for it alone is what keeps this from also running
-    the occlusal and cervical passes over every mesh for landmarks nobody wants
-    here. ALI restricts it to the mandible itself, so an upper arch in the batch
-    costs nothing.
-    """
-    logger.info("AREG: asking 'ALI_IOS' for mucogingival landmarks")
-    parameters = {
-        "input": mesh_dir,
-        "output_dir": _output(sup, "ALI_IOS"),
-        # No `modality` any more, and that is the split showing through: this
-        # used to pass "IOS" explicitly because ALI was one tool serving both,
-        # defaulted to CBCT, and would have been handed surfaces. ALI_IOS takes
-        # no such argument -- the tool IS the modality -- so passing it now
-        # fails on an unexpected keyword. The disambiguation was deleted rather
-        # than moved.
-        #
-        # `networks`, not `ios_networks`, for the same reason: an argument that
-        # only ever applied to one modality stopped needing the prefix that told
-        # them apart.
-        "networks": ["Mucogingival"],
-        "prediction_ID": "MG_Pred",
-    }
-    if model_path:
-        parameters["model"] = model_path
-    return _returned(sup.run("ALI_IOS", **parameters))
+    logger.info("AREG: asking 'AMASSS' for T1 masks (%s)", ", ".join(mask_structures))
+    return _returned(sup.run(
+        "AMASSS",
+        scans=scan_dir,
+        model=model_path,
+        output_dir=_output(sup, "AMASSS"),
+        structures=list(mask_structures),
+        # One binary file per structure: `find_masks` looks each region's mask
+        # up by name, and a merged multi-label volume would make every region
+        # resolve to the same file.
+        merge=["SEPARATE"],
+        prediction_ID="seg",
+        generate_surface=False,
+    ))

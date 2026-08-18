@@ -30,7 +30,7 @@ import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
-from ..errors import ToolInputError
+from sadt_areg_common.errors import ToolInputError
 
 from . import net, orientation, postprocess, surfaces
 
