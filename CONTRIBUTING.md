@@ -364,6 +364,34 @@ tool environments whose pins are deliberately incompatible, and anything it
 pulled in would have to be satisfiable by all of them at once — which is the
 constraint this repository exists to remove.
 
+### A `sup.run()` call must live in the tool's own `src/`
+
+Never in a shared package, however much orchestration two tools appear to have
+in common. `describe.py` derives the schema's `calls` field by **reading each
+tool's own source** — the call sites sit in branches only a real run reaches, so
+there is nothing to introspect at import time — and the server refuses to start
+when a declared call names a tool it does not serve. Orchestration moved into a
+shared package is invisible to both: the names never reach `calls`, and the
+startup check silently has nothing to verify.
+
+That is worse than no check. A tool would then declare `supervisor = true` with
+an empty `calls`, and a renamed sibling would break it at run time again —
+which is exactly what the check was added to prevent.
+
+AREG is the case that settles it. Its two engines share four of the six helpers
+in `tools.py` (`require`, `_output`, `_returned`, `orient_scans`), and only
+`segment_masks` is CBCT-specific against `label_crowns` and
+`predict_mucogingival` on the IOS side. Sharing the four would have been the
+obvious move; it would have hidden `sup.run("ASO", ...)` from the generator for
+both tools. Each engine carries its own copy, holding only what it calls, and
+the two `calls` lists come out right:
+
+    AREG_CBCT   calls = ["AMASSS", "ASO"]
+    AREG_IOS    calls = ["ALI_IOS", "ASO", "Crown_Seg"]
+
+This is the standing rule applied, not an exception to it: orchestration is
+**implementation**, and it has to stay where the tooling can see it.
+
 ### `[tool.uv.sources]` only applies to DECLARED dependencies
 
 A source says *where* a package comes from. It does not make the package a
