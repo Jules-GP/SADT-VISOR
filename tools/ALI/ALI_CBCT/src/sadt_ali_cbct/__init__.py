@@ -48,6 +48,7 @@ def run(
     prediction_ID: str = "Pred",
     device: Literal["cuda", "cpu"] = "cuda",
     search_seconds: float = 0.0,
+    seed: int = 0,
 ) -> Path:
     """Place anatomical landmarks on a CBCT scan.
 
@@ -76,6 +77,12 @@ def run(
             before it is reported as not found. 0 uses the default for the
             device in use -- 15 s on CUDA, 60 s on CPU -- since there is no
             nullable type in the schema to express "unset" with.
+        seed: Seed the agents respawn from, so a run is reproducible. An agent
+            that steps out of the volume restarts from a random position, and
+            for a landmark at the edge of the field of view that position
+            decides the answer -- so on the default the same scan gives the
+            same landmarks every time, and changing it is how to see how stable
+            a point actually is.
 
     Returns:
         The output directory, holding the markups files and the run report.
@@ -93,5 +100,6 @@ def run(
         prediction_ID=prediction_ID,
         device=device,
         search_seconds=search_seconds,
+        seed=seed,
     )
     return output_dir

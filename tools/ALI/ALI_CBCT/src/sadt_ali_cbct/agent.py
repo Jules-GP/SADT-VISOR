@@ -7,12 +7,13 @@ the point found when the agent revisits a position it has been to recently
 finer scale left, average a short exploration around the final position to
 smooth out the last voxel of jitter.
 
-Ported from ALI_CBCT_utils/agent.py, with the training half removed and two
-real defects fixed -- see `_move` and `search`.
+Ported from ALI_CBCT_utils/agent.py, with the training half removed and three
+real defects fixed -- see `_move`, `search` and `_respawn`.
 """
 
 import logging
 import time
+import zlib
 from collections import deque
 
 import numpy as np
@@ -50,6 +51,23 @@ _FOCUS_OFFSETS = np.array(
 _FOCUS_RADIUS = 4
 
 
+def rng_for(target: str, seed: int) -> np.random.Generator:
+    """The random stream one landmark's agent respawns from.
+
+    Derived from the run's seed AND the landmark's name, rather than taken
+    from a single stream shared by the whole scan, so that a landmark's result
+    depends only on (scan, weights, seed) -- never on which OTHER landmarks
+    were asked for. The same weights are called both ways: ASO asks for seven
+    points through the supervisor, a standalone run asks for 119, and one
+    shared stream would put C4 somewhere different in each.
+
+    `zlib.crc32` and not the built-in `hash()`: hashing of `str` is salted per
+    process by PYTHONHASHSEED, which would hand the seed straight back to the
+    entropy it is here to remove.
+    """
+    return np.random.default_rng([seed, zlib.crc32(target.encode("utf-8"))])
+
+
 class NotFound(Exception):
     """The agent did not converge on its landmark in this scan.
 
@@ -70,7 +88,16 @@ class Agent:
         speed_per_scale=SPEED_PER_SCALE,
         spawn_radius: int = SPAWN_RADIUS,
         short_memory: int = 10,
+        *,
+        rng: np.random.Generator,
     ):
+        # Keyword-only and without a default on purpose. Defaulting to a fresh
+        # unseeded generator would let a caller reintroduce the very defect
+        # `_respawn` documents just by forgetting an argument, and it would do
+        # so silently -- the run still succeeds, it just answers differently
+        # next time. There is no way to construct an Agent that does not know
+        # where its randomness comes from.
+        self.rng = rng
         self.target = target
         self.scale_keys = tuple(scale_keys)
         self.brain = brain
@@ -124,15 +151,29 @@ class Agent:
         At the coarse scale that is anywhere in the volume; at a finer one it
         is near where the previous scale left off, since that position is
         already approximately right.
+
+        Drawn from `self.rng` and not from the global `np.random`, which is the
+        third defect carried over from the original. Nothing in this tool ever
+        seeded that global, so the spawn position came from OS entropy: on a
+        landmark that sits at the edge of the field of view -- where respawning
+        is not the rare accident it is elsewhere -- the same scan, the same
+        container and the same weights answered differently from one run to the
+        next. On the reference scan, C4 came back at one of two positions 53 mm
+        apart, or not at all, across six identical runs. Every other landmark
+        was bit-identical, because every other landmark never leaves the volume.
+
+        This is the same defect ASO had in `geometry.best_triplet`, and it has
+        the same second symptom: a global stream is shared, so two concurrent
+        requests in one process consume each other's randomness.
         """
         if self.scale_state == 0:
-            self.position = np.random.randint(
+            self.position = self.rng.integers(
                 1, self.environment.size(self._current_scale()), dtype=np.int16
             )
             self.start_position = self.position
             return
 
-        offset = np.random.randint([1, 1, 1], self.spawn_radius * 2) - self.spawn_radius
+        offset = self.rng.integers([1, 1, 1], self.spawn_radius * 2) - self.spawn_radius
         self.position = np.clip(self.start_position + offset, 0, None).astype(np.int16)
 
     def _has_circled(self) -> bool:
