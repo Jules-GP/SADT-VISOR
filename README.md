@@ -187,3 +187,13 @@ uv run pytest    # runs run() end to end
 commit it was ported from and whether the algorithm was modified. That table --
 not this repository's commit history -- is what tells you six months from now
 whether a result came from upstream code or from something we changed.
+
+## Licence and provenance
+
+This repository is released under the MIT licence (`LICENSE`).
+
+The clinical tools packaged here derive from
+[SlicerAutomatedDentalTools](https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools),
+which is distributed under the 3D Slicer licence, a BSD-style licence. That
+licence continues to govern the parts of this code that come from it, and its
+terms are met by keeping the upstream notice with any redistribution.

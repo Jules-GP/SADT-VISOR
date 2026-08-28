@@ -3,6 +3,7 @@ message: If you use this software, please cite it using these metadata.
 title: SADT-VISOR: environment-isolated dental imaging tools
 abstract: Ten dental imaging tools, each with its own Python interpreter and lockfile, described by their own run() signature.
 type: software
+license: MIT
 authors:
   - given-names: Jules
     family-names: Grivot Pélisson
