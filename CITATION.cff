@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using these metadata.
+title: SADT-VISOR: environment-isolated dental imaging tools
+abstract: Ten dental imaging tools, each with its own Python interpreter and lockfile, described by their own run() signature.
+type: software
+authors:
+  - given-names: Jules
+    family-names: Grivot Pélisson
+    affiliation: "CPE Lyon, Lyon, France; Department of Orthodontics, Adams School of Dentistry, University of North Carolina at Chapel Hill, NC, USA"
+  - given-names: Raphaël
+    family-names: Barret
+    affiliation: "CPE Lyon, Lyon, France; Department of Orthodontics, Adams School of Dentistry, University of North Carolina at Chapel Hill, NC, USA"
+  - given-names: Lucia
+    family-names: Cevidanes
+    affiliation: "Department of Orthodontics, Adams School of Dentistry, University of North Carolina at Chapel Hill, NC, USA"
+repository-code: "https://github.com/DCBIA-OrthoLab/SADT-VISOR"
+keywords:
+  - reproducible research
+  - research software
+  - dental imaging
+  - dependency isolation
