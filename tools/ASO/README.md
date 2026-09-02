@@ -83,7 +83,7 @@ That ordering is upstream's -- the Slicer chain ran `PRE_ASO_CBCT` before
 run ASO on its output". Recentring is a pure metadata change, so the reordering
 *ought* to be exact; ALI's `physical_position` takes the absolute value of the
 origin, which does not commute with moving it. That is
-[issue #11](https://github.com/Jules-GP/sadt-tools/issues/11), it is **not**
+[issue #11](https://github.com/DCBIA-OrthoLab/SADT-VISOR/issues/11), it is **not**
 being fixed here, and the order is kept as it was rather than bet on.
 
 So ASO receives a **supervisor** and calls through it, at the point ALI has
