@@ -180,46 +180,65 @@ removed years ago; at 1.6.0 only the former exists and the branch is gone.
 
 ### pytorch3d
 
-Only the IOS engine needs it, so it sits behind an extra and a plain `uv sync`
-stays fast -- CI can import the package and publish its schema, and the CBCT
-engine works with no pytorch3d at all.
+`ALI_IOS` needs it and `ALI_CBCT` does not, which is the whole reason the two
+were split. It is a **direct, pinned dependency of `ALI_IOS` alone**:
 
 ```toml
-[project.optional-dependencies]
-ios = ["pytorch3d"]
+dependencies = ["torch==2.11.0", "torchvision==0.26.0", "pytorch3d==0.7.9+pt2110cu128", ...]
+
+[[tool.uv.index]]
+name = "pytorch3d-wheels"
+url = "https://ImageMindAnalytics.github.io/pytorch3d-wheels/simple/"
+explicit = true
 
 [tool.uv.sources]
-pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", tag = "v0.7.9" }
-
-[tool.uv.extra-build-dependencies]
-pytorch3d = ["torch"]
+pytorch3d = { index = "pytorch3d-wheels" }
 ```
 
-Same incantation as [Crown_Seg](../Crown_Seg/README.md), same tag, so the two
-tools share one build:
+**A prebuilt wheel, not a source build.** That index is the one upstream's own
+`install_pytorch.py` reads, and `uv.lock` pins the `cp311 manylinux_2_28`
+wheel by sha256. A plain `uv sync --frozen` installs it: no extra, no `nvcc`,
+no compilation, and the deployment image gets it the same way as any other
+package.
 
-- PyPI's newest pytorch3d is 0.7.4, with wheels for cp38-cp310 only, built
-  against a torch generations older than ours. It is compiled from source.
-- `extra-build-dependencies` puts torch into pytorch3d's isolated build
-  environment. Its `setup.py` imports torch without declaring it, so without
-  this the lock fails with `ModuleNotFoundError: No module named 'torch'`.
-  `no-build-isolation-package` does **not** work here -- it stops uv from
-  providing torch rather than making it available.
-
-`uv lock` resolves 56 packages in about a second. `uv sync --extra ios` then
-compiles pytorch3d; deployment should do that once and keep the wheel in a local
-`/wheels` directory rather than rebuilding it per image.
-
-The venv is 8.8 GB synced without the extra. See the repository README on
-deduplicating that across tools at build time.
+The wheel tag `+pt2110cu128` names one torch version and one CUDA variant
+exactly, which is why torch and torchvision are pinned beside it -- the three
+move together or the C extension does not load. `explicit = true` on both
+indexes is load-bearing: as a plain extra index uv is free to mix registries,
+which is how a torch 2.11.0+cu130 once got paired with a wheel that imports and
+then dies on a missing libcudart.
 
 ## Validated against
 
-- **Schema**: `describe.py` accepts the signature and publishes 9 arguments,
-  `returns: path`, with `choices` on `cbct_regions` (4), `landmarks` (119),
-  `ios_networks` (2) and `device` (2). Asserted out of process in
-  `tests/test_integration.py` against the real venv.
-- **Tests**: 57 passing, 1 skipped, 1 GPU test deselected. The agent is stubbed,
+- **Against upstream, 2026-09-02, both engines.** `origin/main` extracted and
+  run with this package's own virtualenv, on the same mesh, the same bundle and
+  the same rasterisation settings (224 / 0 / 1).
+
+  *IOS*: 73 landmarks each side, the same labels, **54 identical to the
+  float**. All 19 that differ land on the correct tooth, and 17 of them come
+  from one line: upstream truncates its logits to `int16` before the argmax on
+  the crown networks, which turns near ties into exact ties that argmax
+  resolves toward the background. Measured over the Cervical pass, 12 576
+  pixels of 15.65 M change class -- the landmark channels losing 6 283 and
+  gaining 145, so the mask only ever shrinks, and it shrinks more the higher
+  the class index (`CB` is class 2 and loses ties to `CL` as well as to the
+  background: it drops 31-74 % of its faces, `CL` 14-47 %). Restoring that one
+  cast takes the port to **71 of 73 identical**; the two residuals are
+  `LR2CL` at 0.198 mm, below this mesh's own vertex spacing, and `LR5MG` at
+  0.179 mm from the per-tooth camera aiming.
+
+  *CBCT*, on Ba/S/N: two identical to the float, `N` differing by 0.187 mm.
+  Upstream's bounds check reads `new_pos.all() > 0`, which reduces the vector
+  to one boolean before comparing -- so it tests "no component is exactly
+  zero" rather than "every component is positive", and a legitimate coordinate
+  of zero respawns the agent at a random position. Both defects date from the
+  original implementation, July 2022, and are still on `origin/main`.
+
+- **Schema**: `describe.py` accepts both signatures. `ALI_CBCT` publishes 8
+  arguments, with `choices` on `regions` (4), `landmarks` (119) and `device`
+  (2); `ALI_IOS` publishes 6, with `choices` on `networks` (3) and `device`
+  (2). Asserted out of process against the real venvs.
+- **Tests**: 50 in `ALI_CBCT` (2 GPU tests deselected) and 12 in `ALI_IOS`. The agent is stubbed,
   so mode detection, DICOM recognition, weight discovery, the vocabulary, output
   naming, tree preservation, the run report, work-directory cleanup, the
   output-containment rule and every cross-argument rule run for real, with no
@@ -270,24 +289,26 @@ deduplicating that across tools at build time.
     upper arch is not a missing model but a question the network cannot be
     asked -- `jaws_without_model` stays empty and the occlusal pass is
     unaffected.
-- **Mucogingival's predictions are NOT validated.** The only intraoral fixture
-  on hand is an upper arch, and MG runs on the mandible alone, so nothing here
-  has ever placed one of its points. What is verified is the plumbing -- the
-  network is offered, off by default, restricted to the lower jaw, its label
-  table is positional, and a degraded point carries its caveat into the file.
-  **A lower-arch mesh is all that is missing**; see tests/data/README.md.
+- **Mucogingival runs.** On `DATA/FlexReg/testfiles/Arches/Lower_arch.vtk`, a
+  labelled lower arch carrying all 13 MG teeth, it places 13 landmarks out of
+  13 in 10 s on cuda, none of them forced. Twelve are identical to what
+  upstream places; the thirteenth differs by 0.179 mm, from this package's
+  per-tooth camera aiming.
+- **What is NOT established is accuracy.** No annotated intraoral scan is
+  staged here, so nothing measures how far these points sit from where a
+  clinician would put them. The comparison below says the port is faithful to
+  the code it came from -- not that the answer is right.
 
 ## Working on it
 
 ```bash
-cd tools/ALI
-uv sync                    # ~8.8 GB, CUDA wheels, no pytorch3d
-uv run pytest -m "not gpu" # 57 tests, no GPU and no checkpoints needed
-uv sync --extra ios        # compiles pytorch3d, needs nvcc (not just a driver)
-uv run pytest -m models    # the real bundles, see tests/data/README.md
+cd tools/ALI/ALI_IOS        # or ALI_CBCT -- tools/ALI/ has no pyproject of its own
+uv sync                     # pytorch3d included, as a wheel
+uv run pytest -m "not gpu"  # 12 tests here, 50 in ALI_CBCT
+uv run pytest -m models     # needs the real bundles under DATA/ALI/models/
 ```
 
 ```bash
-# The schema the server publishes
-.venv/bin/python ../../scripts/describe.py .
+# The schema the server publishes, for this engine
+.venv/bin/python ../../../scripts/describe.py .
 ```
