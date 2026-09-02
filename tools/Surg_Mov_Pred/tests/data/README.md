@@ -22,7 +22,7 @@ uv run pytest -m models
 ```
 
 Both live under the deployment's `/DATA` mount, or under `DATA/SurgMovPred/` in
-a `slicer-remote-tool-server` checkout. Write results to the repository's
+a `VISOR-serve` checkout. Write results to the repository's
 gitignored `output/` directory if you run the tool by hand -- never next to the
 inputs.
 

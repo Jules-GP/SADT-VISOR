@@ -1,13 +1,13 @@
 # What the server has to do
 
 Written for whoever works on
-[slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server).
+[VISOR-serve](https://github.com/DCBIA-OrthoLab/VISOR-serve).
 It is the other half of the split: this repository holds tools that know nothing
 about the server, so everything they stopped doing, the server now does.
 
 ## Status: re-checked against the server, 2026-08-18
 
-Checked against `slicer-remote-tool-server` on **`main`** at `10be711`, with
+Checked against `VISOR-serve` on **`main`** at `10be711`, with
 uncommitted work in the tree (a per-tool `timeout_seconds`, a process-group
 kill, and `peak_vram_bytes` instrumentation). Read-only inspection.
 
@@ -394,7 +394,7 @@ server now reads that key. Passing `landmarks` (a folder of `.mrk.json`) still
 makes fully-automated CBCT work with no supervisor at all, which is what lets
 ASO be used standalone -- keep that door open in every tool that takes a `sup`.
 
-[issue #11]: https://github.com/Jules-GP/sadt-tools/issues/11
+[issue #11]: https://github.com/DCBIA-OrthoLab/SADT-VISOR/issues/11
 
 ## 6. What was deleted, and what was not
 

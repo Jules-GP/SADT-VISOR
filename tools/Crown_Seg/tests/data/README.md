@@ -16,7 +16,7 @@ the URLs and sizes:
 | `T1_01_U_segmented.vtk` | 15.9 MB | ALIDDM release v1.0.4 |
 
 ```bash
-scripts/setup-models.sh --tool CrownSeg      # from a slicer-remote-tool-server checkout
+scripts/setup-models.sh --tool CrownSeg      # from a VISOR-serve checkout
 ```
 
 Note that the published test mesh is **already segmented** -- it carries a

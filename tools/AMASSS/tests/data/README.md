@@ -20,7 +20,7 @@ uv run pytest -m models
 ```
 
 Both live under the deployment's `/DATA` mount, or under `DATA/AMASSS/` in a
-`slicer-remote-tool-server` checkout. It needs a CUDA device and takes a few
+`VISOR-serve` checkout. It needs a CUDA device and takes a few
 minutes for three structures. Write manual runs into the repository's gitignored
 `output/` directory, never next to the inputs.
 
