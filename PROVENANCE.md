@@ -29,7 +29,7 @@ otherwise names what changed and why, matching the tool README.
 unmerged branch when the `git subtree split` carried the tools into this
 repository, so `git log --follow` stops at the commit that copied its files in.
 The server-side source is preserved at the `archive/AREG` tag in
-`slicer-remote-tool-server`, and parked there as `server/tools/_AREG/`.
+`VISOR-serve`, and parked there as `server/tools/_AREG/`.
 
 **ALI's, ASO's and AREG's upstream commits are unrecorded, and that is a gap,
 not a style.** Both server-side ports landed with no upstream revision in the commit

@@ -31,9 +31,9 @@ is handled by deduplication at build time rather than by convergence.
 
 | Repository | What is in it | Open it to |
 |---|---|---|
-| [slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server) | The generic HTTP server: routes, auth, dispatch, the runner, the `/DATA` store. Knows nothing about dental tools. | Change the API, authentication, job handling or deployment. What it has to do to serve these tools is written down in [docs/SERVER_CONTRACT.md](docs/SERVER_CONTRACT.md) |
+| [VISOR-serve](https://github.com/DCBIA-OrthoLab/VISOR-serve) | The generic HTTP server: routes, auth, dispatch, the runner, the `/DATA` store. Knows nothing about dental tools. | Change the API, authentication, job handling or deployment. What it has to do to serve these tools is written down in [docs/SERVER_CONTRACT.md](docs/SERVER_CONTRACT.md) |
 | **sadt-tools** (this one) | One isolated project per tool. Knows nothing about the server. | Change what a tool computes, or the versions it computes it with |
-| [SlicerAutomatedDentalToolsCloud](https://github.com/Jules-GP/SlicerAutomatedDentalToolsCloud) | The thin 3D Slicer client. Discovers everything through `GET /tools`. | Change the user interface |
+| [AutomatedDentalToolsRemote](https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote) | The thin 3D Slicer client. Discovers everything through `GET /tools`. | Change the user interface |
 | [SlicerAutomatedDentalTools](https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools) | Upstream. The origin of every algorithm here. | Check what a port was ported from |
 
 ## The interface
