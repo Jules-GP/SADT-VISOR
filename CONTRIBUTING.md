@@ -549,7 +549,7 @@ State:
 Prefer an open question in the PR over a silent decision.
 
 Once the tool is merged here, open a companion PR on
-`slicer-remote-tool-server` deleting it there. **Never delete first** -- the
+`VISOR-serve` deleting it there. **Never delete first** -- the
 server keeps working off its copy until this one is proven.
 
 ## Stop and ask when

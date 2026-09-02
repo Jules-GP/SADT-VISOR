@@ -17,7 +17,7 @@ tool built and its CBCT bundle staged:
 
 ```bash
 cd ../ALI && uv sync          # ~8.8 GB, CUDA wheels
-scripts/setup-models.sh --tool ALI   # from a slicer-remote-tool-server checkout
+scripts/setup-models.sh --tool ALI   # from a VISOR-serve checkout
 ```
 
 | File | Layout | Size |
