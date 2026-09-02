@@ -1,7 +1,7 @@
 [project]
 name = "sadt-template"
 version = "0.1.0"
-description = "Reference package showing the run() contract every sadt-tools tool follows."
+description = "Reference package showing the run() contract every SADT-VISOR tool follows."
 # Accurate, not aspirational: numpy 1.26.4 publishes no wheel past 3.12, and an
 # open-ended ">=3.11" makes uv pick 3.14 and spend a quarter-hour building it
 # from source -- or fail. Bound `requires-python` by what the pins support.
