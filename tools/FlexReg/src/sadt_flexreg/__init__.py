@@ -86,7 +86,10 @@ def run(
             from the four teeth below; the mucogingival line has to be present in
             the mesh already.
         reference: The surface the others are registered onto. Required to
-            register, unused when only building a patch.
+            register, unused when only building a patch. The registration reads
+            the patch off BOTH meshes, so one that carries none is given the
+            same patch these arguments describe, and written back beside the
+            results as `<name>_patch.vtk`.
         tooth_anterior_right: Universal number of the anterior right tooth.
         anterior_right: Where that corner sits: ratio along the tooth (0 at
             mid-arch, 1 on the tooth) and millimetres fore or aft.
@@ -100,9 +103,9 @@ def run(
         output_suffix: Appended to each written file's name.
 
     Returns:
-        The output directory: the written surfaces, their `.tfm` transforms, and
-        `FlexReg_report.json` naming per surface what was built and what it
-        registered on.
+        The output directory: the written surfaces, their `.tfm` transforms,
+        the patched reference when one was built, and `FlexReg_report.json`
+        naming per surface what was built and what it registered on.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,7 +120,6 @@ def run(
         raise ToolInputError(
             "'{}' registers onto a reference surface: name one in 'reference'.".format(mode)
         )
-    target = read_surface(str(reference)) if registering else None
 
     teeth = {
         "anterior_right": tooth_anterior_right,
@@ -137,6 +139,40 @@ def run(
     root = Path(surfaces)
     report = {"mode": mode, "patch": patch, "surfaces": {}}
     produced = []
+
+    # The reference needs the patch as much as the moving surface does: the ICP
+    # applies its selection to BOTH meshes, so a reference carrying no patch
+    # array selects nothing to match against. Nothing built one on it, and the
+    # failure came out of the ICP as a `NoSegmentationSurf` -- a class no
+    # mapping knows -- so a request naming two ordinary arches answered 500
+    # with no reason in it.
+    target = None
+    if registering:
+        target = read_surface(str(reference))
+        if patch == "Palate (butterfly)":
+            if not target.GetPointData().HasArray(BUTTERFLY_ARRAY):
+                # Once, here, rather than once per surface: a cohort registers
+                # onto ONE reference, and the patch is a GPU pass.
+                build_butterfly(target, teeth, ratios, adjustments, 1, shift[0], shift[1])
+                merge_patches(target)
+                # Written back so the caller can SEE what it registered onto.
+                # The region is the whole argument of the method, and a client
+                # showing the moved arch beside an unmarked reference shows the
+                # one thing nobody can check. Always `.vtk`: an `.stl`
+                # reference cannot carry the array that was just built on it.
+                report["reference"] = str(write_surface(
+                    target,
+                    str(output_dir / (Path(str(reference)).stem + "_patch.vtk")),
+                ))
+        elif not target.GetPointData().HasArray(MUCOGINGIVAL_ARRAY):
+            # The mucogingival line is read off the mesh rather than shaped from
+            # four teeth, so there is nothing to build here. Raised before a
+            # cohort is read: every surface would otherwise fail identically,
+            # each reported as if the patient's own data were at fault.
+            raise ToolInputError(
+                "The reference surface carries no '{}' array, so there is "
+                "nothing to register onto.".format(MUCOGINGIVAL_ARRAY)
+            )
 
     for path in surfaces_in(str(root)):
         # Relative to the input root, so two patients named the same in

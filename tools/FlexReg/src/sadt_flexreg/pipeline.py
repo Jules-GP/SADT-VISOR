@@ -205,6 +205,15 @@ def register(source, target, patch_array):
             "The moving surface carries no '{}' array, so there is nothing to "
             "register on. Build a patch first.".format(patch_array)
         )
+    # The same failure on the other side, and only this side was checked. `ICP`
+    # applies its selection to the target too, where a missing array surfaced as
+    # a `NoSegmentationSurf` raised inside the selection -- an exception class
+    # nothing maps, so the caller was told only that the run had failed.
+    if not target.GetPointData().HasArray(patch_array):
+        raise ToolInputError(
+            "The reference surface carries no '{}' array, so there is nothing "
+            "to register onto. Build a patch on it first.".format(patch_array)
+        )
 
     option = vtkMeshTeeth(list_teeth=[1], property=patch_array)
     result = ICP([vtkICP()], option=option).run(source, target)

@@ -150,6 +150,89 @@ def test_registering_on_a_patch_that_is_not_there_says_so(tmp_path):
         pipeline.register(plain, plain, pipeline.BUTTERFLY_ARRAY)
 
 
+def _patched(path):
+    """A surface already carrying the merged `Butterfly` array."""
+    surface = pipeline.read_surface(_write_surface(path))
+    array = numpy_to_vtk(np.ones(surface.GetNumberOfPoints(), dtype=np.int32), deep=True)
+    array.SetName(pipeline.BUTTERFLY_ARRAY)
+    surface.GetPointData().AddArray(array)
+    return surface
+
+
+def _stub_patch(recorder):
+    """Stand in for the GPU pass: record the call and add the array it would."""
+    def _build(surface, teeth, ratios, adjustments, index, shift_lr, shift_ap):
+        recorder.append(surface.GetNumberOfPoints())
+        array = numpy_to_vtk(np.ones(surface.GetNumberOfPoints(), dtype=np.int32), deep=True)
+        array.SetName("Butterfly{}".format(index))
+        surface.GetPointData().AddArray(array)
+        return surface
+    return _build
+
+
+def test_registering_onto_a_reference_with_no_patch_says_so(tmp_path):
+    """Only the moving surface was checked, and the ICP selects the array on
+    BOTH: a bare reference raised `NoSegmentationSurf` from inside the
+    selection, a class nothing maps, so the caller read only "the run failed"."""
+    plain = pipeline.read_surface(_write_surface(tmp_path / "plain.vtk"))
+
+    with pytest.raises(ToolInputError, match="reference surface"):
+        pipeline.register(_patched(tmp_path / "patched.vtk"), plain,
+                          pipeline.BUTTERFLY_ARRAY)
+
+
+def test_the_reference_is_patched_before_anything_registers_onto_it(tmp_path,
+                                                                    monkeypatch):
+    """Nothing built a patch on the reference, so "Patch and register" on two
+    ordinary arches -- the whole point of the tool -- could not work at all."""
+    built = []
+    import sadt_flexreg as tool
+    monkeypatch.setattr(tool, "build_butterfly", _stub_patch(built))
+    monkeypatch.setattr(tool, "register", lambda source, target, array: (source, np.eye(4)))
+
+    _write_surface(tmp_path / "T1.vtk")
+    _write_surface(tmp_path / "T2.vtk")
+    tool.run(surfaces=tmp_path / "T2.vtk", output_dir=tmp_path / "out",
+             mode="Patch and register", reference=tmp_path / "T1.vtk")
+
+    # The reference, then the moving surface.
+    assert len(built) == 2
+    report = json.loads((tmp_path / "out" / "FlexReg_report.json").read_text())
+    written = pipeline.read_surface(report["reference"])
+    assert written.GetPointData().HasArray(pipeline.BUTTERFLY_ARRAY)
+
+
+def test_a_reference_that_already_carries_a_patch_is_left_alone(tmp_path,
+                                                                monkeypatch):
+    """A patch is a GPU pass, and rebuilding one over a reference the caller
+    patched deliberately would silently replace their region with this call's
+    pad values."""
+    built = []
+    import sadt_flexreg as tool
+    monkeypatch.setattr(tool, "build_butterfly", _stub_patch(built))
+    monkeypatch.setattr(tool, "register", lambda source, target, array: (source, np.eye(4)))
+
+    pipeline.write_surface(_patched(tmp_path / "T1.vtk"), str(tmp_path / "T1.vtk"))
+    _write_surface(tmp_path / "T2.vtk")
+    tool.run(surfaces=tmp_path / "T2.vtk", output_dir=tmp_path / "out",
+             mode="Patch and register", reference=tmp_path / "T1.vtk")
+
+    # The moving surface only.
+    assert len(built) == 1
+
+
+def test_the_mucogingival_line_is_required_on_the_reference_too(tmp_path):
+    """It is read off the mesh rather than shaped from four teeth, so there is
+    nothing to build. Refused before the cohort is read: every surface would
+    otherwise fail identically, each reported as the patient's own fault."""
+    _write_surface(tmp_path / "T1.vtk")
+
+    with pytest.raises(ToolInputError, match="Bottom_MGL"):
+        sadt_flexreg.run(surfaces=tmp_path / "absent", output_dir=tmp_path / "out",
+                         mode="Register", patch="Mucogingival line",
+                         reference=tmp_path / "T1.vtk")
+
+
 # ---------------------------------------------------------------------------
 # The transform
 
