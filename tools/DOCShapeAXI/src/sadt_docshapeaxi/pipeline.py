@@ -37,13 +37,18 @@ def import_torch():
     return torch
 
 
-def discover_surfaces(input_path: str) -> list:
+def discover_surfaces(input_path) -> list:
     """Every `.vtk` under `input_path`, sorted, as file paths.
 
     Recursive, unlike upstream's `os.listdir`, and it returns FILES. Upstream
     also appended to its CSV with mode `'a'` and only rebuilt it when absent,
     so a second run on the same output folder silently reused a stale list.
+
+    `os.fspath` because the runner hands a tool `pathlib.Path` objects for its
+    `path` arguments while every test writes strings. A single uploaded file
+    reached `is_surface_file` as a `Path` and died on `.lower()`.
     """
+    input_path = os.fspath(input_path)
     if os.path.isfile(input_path):
         return [input_path] if is_surface_file(input_path) else []
 
@@ -55,8 +60,8 @@ def discover_surfaces(input_path: str) -> list:
     return sorted(found)
 
 
-def is_surface_file(name: str) -> bool:
-    return name.lower().endswith(SURFACE_EXTENSIONS)
+def is_surface_file(name) -> bool:
+    return os.fspath(name).lower().endswith(SURFACE_EXTENSIONS)
 
 
 def resolve_device(requested: str) -> str:
@@ -67,6 +72,61 @@ def resolve_device(requested: str) -> str:
     return requested
 
 
+# The 2D backbone shapeaxi builds around the mesh renderer. It is NOT in the
+# checkpoint: `EfficientNet.from_pretrained` fetches it from GitHub the first
+# time a network is constructed, which is an outbound call from inside a
+# request on a server holding patient data. It is staged instead, and
+# `check_backbone_is_staged` refuses rather than reaching for it.
+BACKBONE_FILE = "efficientnet-b0-355c32eb.pth"
+BACKBONE_URL = (
+    "https://github.com/lukemelas/EfficientNet-PyTorch/releases/download/1.0/"
+    + BACKBONE_FILE
+)
+
+
+def backbone_cache_path() -> str:
+    """Where torch.hub would look for the backbone, honouring `TORCH_HOME`."""
+    import torch
+
+    return os.path.join(torch.hub.get_dir(), "checkpoints", BACKBONE_FILE)
+
+
+def check_backbone_is_staged() -> None:
+    """Refuse to build a network whose backbone would have to be downloaded."""
+    cached = backbone_cache_path()
+    if os.path.isfile(cached):
+        return
+    raise FileNotFoundError(
+        f"The EfficientNet backbone '{BACKBONE_FILE}' is not staged. shapeaxi "
+        f"builds it around every checkpoint and would otherwise download it "
+        f"mid-request, which a server holding patient data must not do. Stage "
+        f"it at '{cached}' (from {BACKBONE_URL}), or point TORCH_HOME at a "
+        f"directory that already holds it."
+    )
+
+
+def allow_checkpoint_globals() -> None:
+    """Allowlist the classes the published checkpoints pickle.
+
+    torch 2.6 changed `torch.load`'s `weights_only` default to True, and these
+    checkpoints carry their training transform pipeline in `hyper_parameters`.
+    An allowlist names exactly what is trusted; `weights_only=False` would
+    trust everything the file happens to contain.
+    """
+    import inspect
+
+    import torch
+    import torchvision.transforms.transforms as transforms
+    from shapeaxi import saxi_transforms
+
+    allowed = [
+        cls for _, cls in inspect.getmembers(saxi_transforms, inspect.isclass)
+        if cls.__module__.startswith("shapeaxi")
+    ]
+    allowed.append(transforms.Compose)
+    torch.serialization.add_safe_globals(allowed)
+
+
 def load_network(checkpoint: str, network_name: str, device: str):
     """The shapeaxi network named by the checkpoint's row in the catalog.
 
@@ -74,6 +134,8 @@ def load_network(checkpoint: str, network_name: str, device: str):
     """
     from shapeaxi import saxi_nets_lightning
 
+    # The name check first: a catalog that disagrees with the installed
+    # shapeaxi is a startup-shaped mistake, and saying so costs no filesystem.
     network_class = getattr(saxi_nets_lightning, network_name, None)
     if network_class is None:
         raise ValueError(
@@ -81,6 +143,8 @@ def load_network(checkpoint: str, network_name: str, device: str):
             f"saxi_nets_lightning. The checkpoint catalog and the installed "
             f"shapeaxi disagree."
         )
+    check_backbone_is_staged()
+    allow_checkpoint_globals()
     model = network_class.load_from_checkpoint(checkpoint, strict=False)
     model.eval()
     model.to(device)

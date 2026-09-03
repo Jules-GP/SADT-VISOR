@@ -7,6 +7,8 @@ Ported from SlicerAutomatedDentalTools' `DOCShapeAXI` module and
 import json
 import logging
 import os
+from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger("DOCShapeAXI")
 
@@ -14,13 +16,13 @@ __all__ = ["run"]
 
 
 def run(
-    surfaces: str,
-    model: str,
-    output_dir: str,
+    surfaces: Path,
+    model: Path,
+    output_dir: Path,
     explain: bool = True,
     output_suffix: str = "_pred",
-    device: str = "cuda",
-) -> dict:
+    device: Literal["cuda", "cpu"] = "cuda",
+) -> Path:
     """Classify each 3D surface, and paint the reason for it onto the mesh.
 
     Args:
@@ -39,10 +41,16 @@ def run(
             CUDA device is visible.
 
     Returns:
-        `{"outputs": {...}, "predictions": [...], "report": path}`.
+        `{"outputs": {...}, "predictions": [...], "report": path}` -- the
+        `outputs` mapping is what the server turns into the response.
     """
     from . import catalog, engine, pipeline
 
+    # The runner hands a tool `pathlib.Path` for every `path` argument, while
+    # everything here works in strings. Coerced once, at the door.
+    surfaces = os.fspath(surfaces)
+    model = os.fspath(model)
+    output_dir = os.fspath(output_dir)
     analysis = catalog.analysis_for(os.path.basename(model))
 
     if not os.path.exists(model):
@@ -51,7 +59,7 @@ def run(
     found = pipeline.discover_surfaces(surfaces)
     if not found:
         raise ValueError(
-            f"No .vtk surface was found under '{os.path.basename(str(surfaces))}'. "
+            f"No .vtk surface was found under '{os.path.basename(surfaces)}'. "
             f"DOCShapeAXI reads surfaces, not volumes."
         )
 

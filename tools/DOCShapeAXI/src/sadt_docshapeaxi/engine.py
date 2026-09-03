@@ -3,8 +3,7 @@
 import logging
 import os
 
-from . import catalog
-from .pipeline import GRADCAM_IMAGE_SIZE, import_torch, scale_attribution
+from .pipeline import GRADCAM_IMAGE_SIZE, scale_attribution
 
 logger = logging.getLogger("DOCShapeAXI")
 
@@ -72,7 +71,6 @@ def explain(model, analysis, surfaces, mount_point, device, output_dir) -> list:
     the file inside the per-class loop, to the same path each time, so a
     four-class run rewrote the same file four times.
     """
-    import torch
     from captum.attr import LayerGradCam
     from shapeaxi import post_process, utils
     from shapeaxi.saxi_gradcam import gradcam_process
@@ -104,7 +102,8 @@ def explain(model, analysis, surfaces, mount_point, device, output_dir) -> list:
             attribution = attribution.sum(dim=1).cpu().detach()
             scaled = scale_attribution(attribution.numpy(), GRADCAM_IMAGE_SIZE)
             projected = gradcam_process(
-                _Namespace(device=device), scaled, faces, per_face, vertices, device=device
+                _Namespace(device=device, target_class=class_index),
+                scaled, faces, per_face, vertices, device=device,
             )
             surface.GetPointData().AddArray(projected)
             post_process.MedianFilter(surface, projected)
@@ -117,7 +116,14 @@ def explain(model, analysis, surfaces, mount_point, device, output_dir) -> list:
 
 class _Namespace:
     """`gradcam_process` reads its arguments off an object; upstream passed the
-    whole argparse namespace. Only `device` is read."""
+    whole argparse namespace.
 
-    def __init__(self, device):
+    Two fields are read: `device`, and `target_class`, which names the point
+    array it writes (`grad_cam_target_class_2`). Passing the class index is
+    what keeps one array per class on the mesh instead of every class
+    overwriting a single `grad_cam_max`.
+    """
+
+    def __init__(self, device, target_class=None):
         self.device = device
+        self.target_class = target_class
