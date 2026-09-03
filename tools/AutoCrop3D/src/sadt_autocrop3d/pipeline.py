@@ -82,9 +82,11 @@ def patient_key(filename: str) -> str:
 
     Built on `sadt_areg_common.pairing` for the two things that must not be
     re-derived per tool -- what a compound scan extension is, and how a stem
-    breaks into tokens -- but NOT on its `patient_stem`: that strips suffixes
-    with `str.find`, which is the substring match this docstring's second
-    bullet exists to avoid. README.md says so at greater length.
+    breaks into tokens -- but NOT on its `patient_stem`, which drops the
+    timepoint and may drop the leading token. Both are right for pairing two
+    timepoints and wrong for pairing a scan with its box: `P01_T1` and `P01_T2`
+    may want two different boxes, and a patient can be called `MAX_01`.
+    README.md says so at greater length.
     """
     stem, extension = pairing.split_scan_extension(filename)
     if extension.lower() not in SCAN_EXTENSIONS:

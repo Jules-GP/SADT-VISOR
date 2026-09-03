@@ -87,13 +87,22 @@ is structural rather than a coincidence of two rules. It is built on
 re-derived per tool — what a compound scan extension is
 (`split_scan_extension`), and how a stem breaks into tokens (`split_parts`).
 
-**It deliberately does not call `pairing.patient_stem`.** That function strips a
-previous run's suffixes with `stem.find(suffix)`, a substring match, which
-reproduces the very truncation listed as defect 2 below: `SMITH_ORTHO` contains
-`_OR`, so `patient_stem` returns `SMITH`. Here, where the key is what pairs a
-scan with its box, that turns two subjects into one silently. `patient_key`
-drops the same vocabulary as **whole tokens** instead, and never drops the
-leading one — a patient really can be called `MAX_01`.
+**It deliberately does not call `pairing.patient_stem`**, for two reasons that
+remain after the shared module was fixed:
+
+- **It keeps the timepoint.** `patient_stem` drops `_T1`/`_T2` by design, which
+  is right for a tool that pairs two timepoints and wrong here: `P01_T1` and
+  `P01_T2` are two scans that may legitimately want two different boxes, and
+  collapsing them is defect 2 below.
+- **It never drops the leading token.** A patient really can be called
+  `MAX_01`, and the crop must not key it as `01`.
+
+A third reason used to stand and no longer does, so it is recorded here rather
+than quietly removed: `patient_stem` matched its suffix table with
+`stem.find(suffix)`, a substring match at any index, so `SMITH_ORTHO` returned
+`SMITH` and `P_Seg1`/`P_Seg2` both returned `P`. That was fixed in
+`sadt_areg_common.pairing` — the match is token-aligned now — and both those
+names come back whole.
 
 ## The thirteen defects
 

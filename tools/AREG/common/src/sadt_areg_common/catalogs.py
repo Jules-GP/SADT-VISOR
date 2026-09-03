@@ -125,6 +125,12 @@ TIMEPOINT_TOKENS = ("t1", "t2", "t0")
 
 # Suffixes a previous run of AREG, ASO, AMASSS or ALI leaves on a name.
 # Longest first, so "_Scanreg" is not cut short by "_Scan".
+#
+# Matched as WHOLE TOKENS and truncated from, never as a substring at any index:
+# "_Seg" is a mark a previous run left, "_Seg1" is part of somebody's name. See
+# `pairing._token_aligned_index`, and note that this table is case-SENSITIVE --
+# which is why "_Scan"/"_scan", "_Seg"/"_seg" and "_Or"/"_OR" are each listed
+# twice and "_SEG" is not listed at all.
 PATIENT_SUFFIXES = (
     "_lm_Pred", "_Scanreg", "_MERGED", "_OutReg", "_SegOr",
     "_scan", "_Scan", "_Seg", "_seg", "_Or", "_OR", "_lm",

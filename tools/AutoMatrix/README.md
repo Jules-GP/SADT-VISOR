@@ -65,6 +65,18 @@ with the transform vocabulary the shared table does not know (`transform`,
 `C_0001_CB_Reg_transform.tfm` keys to `C_0001_CB_Reg_transform` and matches no
 scan, which is this tool's whole job.
 
+**The `P_Seg1` half of that was overstated until the shared module was fixed.**
+The dot is genuinely handled — `split_scan_extension` splits compound
+extensions properly and always did. But `patient_stem` matched its own suffix
+table with `stem.find(suffix)` at any index, which is the same substring test in
+a shorter spelling: `P_Seg1_T1.nii.gz` and `P_Seg2_T1.nii.gz` both reduced to
+`P`, so the port reproduced upstream's truncation rather than removing it. The
+suffix now has to end on a token boundary (`pairing._token_aligned_index`), and
+`P_Seg1` survives. Nothing else moved: across 464 real cohort names, taken from
+the tools' fixtures and from the staged `DATA/*/testfiles/`, and six `also_drop`
+vocabularies, 35 of 2 784 keys changed and every one of them was a truncated
+identifier being given back.
+
 ## Kept, because it is the rule that matters
 
 Nearest neighbour for a segmentation, linear otherwise. Interpolating a label
