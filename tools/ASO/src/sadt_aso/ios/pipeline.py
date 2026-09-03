@@ -41,7 +41,7 @@ class JawError(Exception):
     """A file's jaw could not be determined from its name."""
 
 
-def patient_and_jaw(filename: str) -> tuple:
+def patient_and_jaw(filename: str, output_suffix: str = "") -> tuple:
     """('P1_U_Seg.vtk') -> ('P1', 'Upper'), ('Upper_gold.vtk') -> ('gold', 'Upper').
 
     Everything from the jaw token onwards is normally decoration a previous
@@ -55,17 +55,27 @@ def patient_and_jaw(filename: str) -> tuple:
     HUTIN1/ASO v1.0.0 Gold_file.zip. When nothing precedes the token, what
     follows it is the identifier rather than decoration.
 
-    **A SECOND jaw token ends that identifier**, because the decoration a
-    predictor appends carries the jaw again: ALI and Crown_Seg write
-    `<mesh stem>_<Jaw>_<type>_Pred.json`, so the landmark file of
-    `Upper_new_9.vtk` is `Upper_new_9_Upper_O_Pred.json`. Without this the
-    identifier ran to the end of the name -- `new_9_Upper_O_Pred` against the
-    mesh's `new_9` -- and the pair landed under two different patients, so the
-    semi-automated mode reported "no landmark file for this jaw" on the very
-    dataset this repository ships. Upstream paired them only because it
-    compared names with `in`, which is what made patient `1` match patient
-    `10`; the exact-stem rule that replaced it is right, it just has to be
-    given the right stem.
+    **The identifier ends at the first decoration token**, which is a second jaw
+    token or `output_suffix`. Both cases are real and both were broken:
+
+    * a predictor names the jaw again -- ALI and Crown_Seg write
+      `<mesh stem>_<Jaw>_<type>_Pred.json`, so the landmark file of
+      `Upper_new_9.vtk` is `Upper_new_9_Upper_O_Pred.json`. Without this the
+      identifier ran to the end of the name, the pair landed under two
+      patients, and Semi-Automated IOS reported "no landmark file for this
+      jaw" on the dataset this repository ships;
+    * this tool's OWN output keeps the suffix -- `Upper_new_9_Or.vtk` gave
+      `new_9_Or`. Feeding a previous run back in, which the caller is
+      explicitly allowed to do (see the fallback below), split the same
+      patient in two all over again.
+
+    When the jaw token is NOT first, both cases are already covered: everything
+    from the jaw token onwards is dropped, decoration included. This branch is
+    the one that had no end.
+
+    Upstream paired the first case only because it compared names with `in`,
+    which is what made patient `1` match patient `10`; the exact-stem rule that
+    replaced it is right, it just has to be given the right stem.
 
     Raises JawError when no token names a jaw, rather than guessing: the
     original defaulted to Lower, so a maxillary mesh named `patient1.vtk` was
@@ -81,8 +91,9 @@ def patient_and_jaw(filename: str) -> tuple:
         if before:
             return "_".join(before), jaw
         after = tokens[index + 1:]
+        decoration = {output_suffix.lower()} if output_suffix else set()
         for offset, later in enumerate(after):
-            if _JAW_TOKENS.get(later.lower()):
+            if _JAW_TOKENS.get(later.lower()) or later.lower() in decoration:
                 after = after[:offset]
                 break
         return "_".join(after) or stem, jaw
@@ -125,7 +136,7 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
             if not (is_surface or is_markups):
                 continue
             try:
-                stem, jaw = patient_and_jaw(file_name)
+                stem, jaw = patient_and_jaw(file_name, output_suffix)
             except JawError as exc:
                 unnamed.append(str(exc))
                 continue

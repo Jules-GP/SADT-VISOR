@@ -350,6 +350,13 @@ the token comes first. Both rules are right. Applied to the pair above they give
 the landmarks have no mesh, and Semi-Automated IOS failed with *"no landmark
 file for this jaw"* on the dataset this repository's own manifest ships.
 
+**Your own output is decoration too**, and this is the half that is easy to
+miss. `ASO` writes `Upper_new_9_Or.vtk`, which read back gives `new_9_Or`, while
+its landmark file `Upper_new_9_Upper_O_Pred_Or.mrk.json` gives `new_9` -- so a
+run fed its own results split one patient in two and failed the same way. A tool
+that accepts a previous run's outputs has to read the names it writes with the
+rule it reads inputs with. **Test the round trip**, not just the input.
+
 Upstream never hit it because it compared names with `in` -- and that is exactly
 what made patient `1` match patient `10`. Replacing the substring test with an
 exact stem was right; it just has to be handed the right stem. **A second jaw

@@ -1060,6 +1060,47 @@ def test_a_prediction_suffix_is_decoration_not_part_of_the_patient(filename, exp
     assert ios_pipeline.patient_and_jaw(filename) == expected
 
 
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        # This tool's own output, fed back in -- which the fallback in
+        # _discover explicitly allows ("used only when a patient has nothing
+        # else"). The suffix must not become part of the patient.
+        ("Upper_new_9_Or.vtk", ("new_9", "Upper")),
+        ("Lower_new_9_Or.vtk", ("new_9", "Lower")),
+        ("Upper_new_9_Upper_O_Pred_Or.mrk.json", ("new_9", "Upper")),
+        # No suffix given: nothing to strip, "Or" is just a token.
+        ("Upper_Or_9.vtk", ("Or_9", "Upper")),
+    ],
+)
+def test_the_output_suffix_is_decoration_too(filename, expected):
+    """`Upper_new_9_Or.vtk` gave `new_9_Or` while its landmark file gave
+    `new_9`, so re-running on an output folder split one patient in two and
+    failed with "no landmark file for this jaw" -- the same symptom as the
+    prediction suffix, one layer out."""
+    suffix = "Or" if filename != "Upper_Or_9.vtk" else ""
+    assert ios_pipeline.patient_and_jaw(filename, suffix) == expected
+
+
+def test_a_previous_run_is_discovered_as_one_patient(tmp_path):
+    """The round trip: everything a run wrote, read back, is one patient with
+    both a surface and a markups file for each jaw."""
+    root = tmp_path / "previous"
+    root.mkdir()
+    for name in ("Upper_new_9_Or.vtk", "Lower_new_9_Or.vtk"):
+        _write_mesh(root / name, _UPPER_CENTROIDS, array_name="PredictedID")
+    for name in ("Upper_new_9_Upper_O_Pred_Or.mrk.json",
+                 "Lower_new_9_Lower_O_Pred_Or.mrk.json"):
+        (root / name).write_text('{"markups": [{"controlPoints": []}]}')
+
+    found = ios_pipeline.discover(str(root), "Or")
+
+    assert list(found) == ["new_9"], f"expected one patient, got {sorted(found)}"
+    for jaw in ("Upper", "Lower"):
+        assert found["new_9"][jaw]["surface"], f"{jaw}: no surface"
+        assert found["new_9"][jaw]["markups"], f"{jaw}: no markups"
+
+
 def test_two_patients_whose_names_are_prefixes_stay_apart():
     """The reason the substring pairing was replaced by an exact stem: upstream
     compared with `in`, so patient `1` matched patient `10`. Ending the
