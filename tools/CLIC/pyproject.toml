@@ -1,0 +1,58 @@
+[project]
+name = "sadt-clic"
+version = "0.1.0"
+description = "Segment the impacted canine on a CBCT scan, slice by slice."
+# The deployment image's interpreter (lab-ai:2026.08, python 3.11.13).
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # torchvision is the point: the network is its `maskrcnn_resnet50_fpn`,
+    # not a checkpoint of our own architecture. torch is pinned WITH it because
+    # the pair has to match, and pinned to the same version the other tools
+    # here use so uv can hardlink one copy across every virtualenv rather than
+    # unpacking a second CUDA stack.
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    # Reading and writing the volume. Upstream uses nibabel rather than
+    # SimpleITK, and the affine and header are copied from the input to the
+    # segmentation, so the two open aligned in a viewer.
+    "nibabel==5.3.2",
+    "numpy==2.3.2",
+]
+
+# What makes this directory a tool. `name` is the API identity: what a client
+# sends, what deployment.toml is keyed by, and what `sup.run()` names.
+[tool.sadt]
+tool = true
+name = "CLIC"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_clic"]
+
+# `explicit` is load-bearing: without it uv looks for EVERY package on the
+# PyTorch index, and most are not there. It is also what makes this a PINNED
+# SOURCE rather than an extra index -- as an extra index uv is free to mix
+# registries, which is how a torch and a torchvision built against different
+# CUDA runtimes get paired, import fine, and die on the first kernel.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+sadt-testkit = { path = "../../testkit", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs DATA/CLIC/models/final_model.pth.",
+]
