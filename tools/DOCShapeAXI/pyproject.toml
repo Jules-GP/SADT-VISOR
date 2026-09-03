@@ -21,13 +21,18 @@ dependencies = [
     "numpy==2.3.2",
     "pandas==2.3.3",
     # The GradCAM implementation. Upstream uses captum's LayerGradCam rather
-    # than pytorch-grad-cam, and only borrows the latter's rescaling.
-    "captum==0.8.0",
-    # `cv2.resize` is the one thing OpenCV is used for -- upscaling a
-    # (H, W) attribution map to the renderer's 224x224. HEADLESS on purpose: a
-    # server has no display, and the full `opencv-python` drags in GUI
-    # libraries that fail to load without one.
-    "opencv-python-headless==4.12.0.88",
+    # than pytorch-grad-cam, and only borrows the latter's rescaling. 0.9.0
+    # rather than upstream's resolved 0.8.0: 0.8.0 caps numpy below 2.0, which
+    # is a contradiction with the numpy every other pin here wants -- so
+    # upstream's conda env necessarily ran this whole stack on numpy 1.x.
+    "captum==0.9.0",
+    # NOT opencv. Upstream imports the whole of OpenCV for one call --
+    # `cv2.resize` of a 2D float map to the renderer's 224x224 -- and every
+    # published opencv wheel caps numpy below the version the rest of this
+    # stack wants. torch's `interpolate` in bilinear mode uses the same
+    # half-pixel convention as `INTER_LINEAR`, so it is the same arithmetic
+    # from a library that is already here. `tests/test_run.py` pins the two
+    # against each other to 1e-5.
     "tqdm==4.67.1",
 ]
 

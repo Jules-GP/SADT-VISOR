@@ -70,9 +70,6 @@ ANALYSES = {
     ),
 }
 
-# What a surface file may be called. Upstream globbed `.vtk` only.
-SURFACE_EXTENSIONS = (".vtk",)
-
 
 def analysis_for(checkpoint_name: str) -> Analysis:
     """The row for a checkpoint, by file name.

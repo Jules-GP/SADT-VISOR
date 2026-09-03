@@ -1,0 +1,125 @@
+"""DOCShapeAXI: classify a 3D anatomical shape, and explain it on the surface.
+
+Ported from SlicerAutomatedDentalTools' `DOCShapeAXI` module and
+`DOCShapeAXI_CLI`.
+"""
+
+import json
+import logging
+import os
+
+logger = logging.getLogger("DOCShapeAXI")
+
+__all__ = ["run"]
+
+
+def run(
+    surfaces: str,
+    model: str,
+    output_dir: str,
+    explain: bool = True,
+    output_suffix: str = "_pred",
+    device: str = "cuda",
+) -> dict:
+    """Classify each 3D surface, and paint the reason for it onto the mesh.
+
+    Args:
+        surfaces: A `.vtk` surface, or a folder of them (searched recursively).
+        model: The checkpoint to use. Its name says which anatomy is being
+            graded, on what scale, and with which network -- upstream asked for
+            all four separately, so a caller could pair a two-class model with
+            a four-class scale and be handed a severity grade the network was
+            never trained to produce.
+        output_dir: Where the explained surfaces and the report are written.
+        explain: Also compute the GradCAM attribution and write it onto each
+            surface as a point array. Off, only the predictions are produced,
+            which is several times faster.
+        output_suffix: Appended to each written surface's stem.
+        device: `cuda` or `cpu`. Falls back to `cpu` with a warning when no
+            CUDA device is visible.
+
+    Returns:
+        `{"outputs": {...}, "predictions": [...], "report": path}`.
+    """
+    from . import catalog, engine, pipeline
+
+    analysis = catalog.analysis_for(os.path.basename(model))
+
+    if not os.path.exists(model):
+        raise FileNotFoundError(f"The checkpoint '{os.path.basename(model)}' was not found.")
+
+    found = pipeline.discover_surfaces(surfaces)
+    if not found:
+        raise ValueError(
+            f"No .vtk surface was found under '{os.path.basename(str(surfaces))}'. "
+            f"DOCShapeAXI reads surfaces, not volumes."
+        )
+
+    device = pipeline.resolve_device(device)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # shapeaxi's dataset joins its file column onto a mount point, so the two
+    # have to share a root. A single file is mounted on its own directory.
+    mount_point = surfaces if os.path.isdir(surfaces) else os.path.dirname(found[0])
+
+    logger.info(
+        "DOCShapeAXI: %d surface(s), %s, %s on %s",
+        len(found), analysis.anatomy, analysis.task, device,
+    )
+
+    network = pipeline.load_network(model, analysis.network, device)
+    values = engine.predict(network, analysis, found, mount_point, device)
+
+    predictions = []
+    for path, value in zip(found, values):
+        predictions.append({
+            "surface": os.path.relpath(path, mount_point),
+            # A regression checkpoint predicts a value, not a class. Upstream
+            # ran argmax on both and so reported class 0 for every regression
+            # subject -- there is only one column to take the argmax of.
+            ("score" if analysis.is_regression else "class"):
+                value if analysis.is_regression else int(value),
+        })
+
+    written = []
+    if explain:
+        written = engine.explain(network, analysis, found, mount_point, device, output_dir)
+        written = _rename_with_suffix(written, output_suffix)
+
+    report_path = os.path.join(output_dir, "DOCShapeAXI_report.json")
+    report = {
+        "model": os.path.basename(model),
+        "anatomy": analysis.anatomy,
+        "task": analysis.task,
+        "classes": analysis.classes,
+        "network": analysis.network,
+        "device": device,
+        "explained": bool(explain),
+        "surfaces": len(found),
+        "predictions": predictions,
+    }
+    with open(report_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+
+    outputs = {"report": report_path}
+    for path in written:
+        outputs[os.path.splitext(os.path.basename(path))[0]] = path
+    return {"outputs": outputs, "predictions": predictions, "report": report_path}
+
+
+def _rename_with_suffix(paths: list, suffix: str) -> list:
+    """Append `suffix` to each written surface's stem.
+
+    Done after the fact rather than inside the writer because shapeaxi names
+    the file it writes; an empty suffix leaves the name alone.
+    """
+    if not suffix:
+        return paths
+
+    renamed = []
+    for path in paths:
+        stem, extension = os.path.splitext(os.path.basename(path))
+        destination = os.path.join(os.path.dirname(path), f"{stem}{suffix}{extension}")
+        os.replace(path, destination)
+        renamed.append(destination)
+    return renamed
