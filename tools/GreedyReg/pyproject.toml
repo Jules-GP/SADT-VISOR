@@ -1,0 +1,49 @@
+[project]
+name = "sadt-greedyreg"
+version = "0.1.0"
+description = "Register two CBCT timepoints with Greedy, rigidly or affinely."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # Greedy itself, as a PYTHON package rather than a binary to shell out to.
+    # Upstream took the executable's path as an argument and made the Slicer
+    # module find it on the user's machine; a client cannot supply a path on
+    # the server, and `picsl_greedy` is published by greedy's own authors with
+    # a `Greedy3D.execute(command)` that takes the same argument string the
+    # command line does. The translation is direct and there is no binary to
+    # install into the image.
+    "picsl_greedy==1.4.0.1",
+    # Reading the mask, and binarising it. Upstream uses nibabel.
+    "nibabel==5.3.2",
+    "numpy==2.3.2",
+    # How a patient is read from a file name, shared rather than copied:
+    # CONTRIBUTING.md lists identity derivation as one of the three things that
+    # belong in a shared package, because two tools exchanging files by name
+    # have to agree on where the identifier ends. It declares no dependencies
+    # of its own, which is what lets it install here.
+    "sadt-areg-common",
+]
+
+[tool.sadt]
+tool = true
+name = "GreedyReg"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_greedyreg"]
+
+[tool.uv.sources]
+sadt-areg-common = { path = "../AREG/common" }
+sadt-testkit = { path = "../../testkit", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`).",
+    "models: needs real scans.",
+]
