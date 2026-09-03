@@ -614,6 +614,11 @@ def _run_ios(
     landmark_keys = catalogs.landmark_keys_by_jaw(teeth, landmark_types)
     driving = catalogs.DRIVING_JAW[occlusion]
 
+    # One cache for the whole cohort: the reference bundle is the same two
+    # files for every patient, and it was being parsed once per jaw per
+    # patient. A patient's own meshes are dropped when that patient is done.
+    cache = ios_pipeline.FileCache()
+
     for key, entry in sorted(patients.items()):
         report["patients"][key] = ios_pipeline.orient_patient(
             jaws=entry,
@@ -628,6 +633,7 @@ def _run_ios(
             suffix=suffix,
             max_triplets=max_triplets,
             seed=seed,
+            cache=cache,
         )
 
     if fully:
