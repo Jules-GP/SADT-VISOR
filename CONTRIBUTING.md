@@ -328,6 +328,51 @@ remember what recording buys and what it does not -- a field is only a signal if
 something reads it. Putting the fact in the status rather than in a side field
 is the right *place*; it is not a guarantee anyone sees it.
 
+### Where an identifier ends, when a file name has been decorated twice
+
+Tools here exchange files by NAME. `ALI` and `Crown_Seg` write beside a mesh,
+`ASO` and `AREG` read what they wrote, and nothing but the file name says the
+two belong to the same patient. So the rule that extracts a patient from a name
+is a contract between tools, not a detail of whichever one you are porting.
+
+A predictor appends what it did to the stem it was given, and what it appends
+**names the jaw again**:
+
+```
+Upper_new_9.vtk                    <- the mesh
+Upper_new_9_Upper_O_Pred.json      <- the landmarks ALI predicted from it
+```
+
+`ASO` reads a patient as "everything before the jaw token", and -- because the
+published reference bundle is `Upper_gold.vtk` -- as "everything after it" when
+the token comes first. Both rules are right. Applied to the pair above they give
+`new_9` and `new_9_Upper_O_Pred`: two patients, so the mesh has no landmarks,
+the landmarks have no mesh, and Semi-Automated IOS failed with *"no landmark
+file for this jaw"* on the dataset this repository's own manifest ships.
+
+**Your own output is decoration too**, and this is the half that is easy to
+miss. `ASO` writes `Upper_new_9_Or.vtk`, which read back gives `new_9_Or`, while
+its landmark file `Upper_new_9_Upper_O_Pred_Or.mrk.json` gives `new_9` -- so a
+run fed its own results split one patient in two and failed the same way. A tool
+that accepts a previous run's outputs has to read the names it writes with the
+rule it reads inputs with. **Test the round trip**, not just the input.
+
+Upstream never hit it because it compared names with `in` -- and that is exactly
+what made patient `1` match patient `10`. Replacing the substring test with an
+exact stem was right; it just has to be handed the right stem. **A second jaw
+token ends the identifier**, because everything from it onwards is decoration a
+later step added.
+
+Two things to carry over:
+
+- **Test the names your neighbours actually write**, not the names your tool
+  writes. The regression was invisible to `ASO`'s own outputs and to every
+  synthetic fixture; only the published test data exposed it.
+- **A stricter rule inherits the burden of the loose one it replaces.** When you
+  tighten a match to fix a false positive, enumerate the true positives the
+  loose version was quietly carrying -- they are not in the tests, or the bug
+  you are fixing would have been caught too.
+
 ### Duplicate the implementation, share the formats
 
 Two tools that need the same code usually get **two copies**. That is
