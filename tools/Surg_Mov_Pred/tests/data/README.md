@@ -12,14 +12,19 @@ The tests that need neither build their own scikit-learn models in
 
 ## Running the real-model test
 
-`test_real_models_predict_every_target` is marked `models` and skips unless both
-paths are given. Point them at the server's data store:
+`test_real_models_predict_every_target` is marked `models`, which is
+**deselected by default** -- `-o addopts=` turns the default selection off so
+`-m models` can select it -- and skips unless both paths are given. Point them
+at the server's data store:
 
 ```bash
 SADT_SURGMOVPRED_MODELS=/path/to/DATA/SurgMovPred/models/all_models \
 SADT_SURGMOVPRED_INPUT=/path/to/DATA/SurgMovPred/testfiles/TestFiles/patients_to_predict.xlsx \
-uv run pytest -m models
+uv run pytest -m models -o addopts=
 ```
+
+It runs in about ten seconds: 112 packages loaded, 112 targets predicted for
+101 patients.
 
 Both live under the deployment's `/DATA` mount, or under `DATA/SurgMovPred/` in
 a `VISOR-serve` checkout. Write results to the repository's
