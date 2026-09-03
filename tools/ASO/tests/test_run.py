@@ -1032,6 +1032,44 @@ def test_the_published_reference_bundle_is_readable(filename, expected):
     assert ios_pipeline.patient_and_jaw(filename) == expected
 
 
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        # What ALI and Crown_Seg actually write beside a mesh.
+        ("Upper_new_9_Upper_O_Pred.json", ("new_9", "Upper")),
+        ("Lower_new_9_Lower_O_Pred.json", ("new_9", "Lower")),
+        # The mesh they were predicted from: the two must agree, or the pair
+        # lands under two patients and neither has what it needs.
+        ("Upper_new_9.vtk", ("new_9", "Upper")),
+        ("Lower_new_9.vtk", ("new_9", "Lower")),
+        # A second jaw token ends the identifier; one alone does not.
+        ("Upper_gold.vtk", ("gold", "Upper")),
+        ("Upper_P1_Lower_Seg.vtk", ("P1", "Upper")),
+    ],
+)
+def test_a_prediction_suffix_is_decoration_not_part_of_the_patient(filename, expected):
+    """`Upper_new_9_Upper_O_Pred.json` is the landmark file of
+    `Upper_new_9.vtk`, and the two have to land on the same patient key.
+
+    They did not: with the jaw token first, the identifier ran to the end of
+    the name, so the mesh was `new_9` and its landmarks `new_9_Upper_O_Pred`.
+    Semi-Automated IOS then failed with "no landmark file for this jaw" on
+    `DATA/ASO/testfiles/IOS_SemiAuto`, the dataset this repository's own
+    manifest ships.
+    """
+    assert ios_pipeline.patient_and_jaw(filename) == expected
+
+
+def test_two_patients_whose_names_are_prefixes_stay_apart():
+    """The reason the substring pairing was replaced by an exact stem: upstream
+    compared with `in`, so patient `1` matched patient `10`. Ending the
+    identifier at a second jaw token must not bring that back."""
+    assert ios_pipeline.patient_and_jaw("1_U.vtk") == ("1", "Upper")
+    assert ios_pipeline.patient_and_jaw("10_U.vtk") == ("10", "Upper")
+    assert ios_pipeline.patient_and_jaw("1_U_Upper_O_Pred.json") == ("1", "Upper")
+    assert ios_pipeline.patient_and_jaw("10_U_Upper_O_Pred.json") == ("10", "Upper")
+
+
 def test_a_gold_bundle_pairs_both_jaws_under_one_case(tmp_path):
     """Both files of the published bundle have to land on the same patient key,
     or load_reference would see two half-cases instead of one reference."""

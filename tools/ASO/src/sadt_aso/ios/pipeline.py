@@ -55,6 +55,18 @@ def patient_and_jaw(filename: str) -> tuple:
     HUTIN1/ASO v1.0.0 Gold_file.zip. When nothing precedes the token, what
     follows it is the identifier rather than decoration.
 
+    **A SECOND jaw token ends that identifier**, because the decoration a
+    predictor appends carries the jaw again: ALI and Crown_Seg write
+    `<mesh stem>_<Jaw>_<type>_Pred.json`, so the landmark file of
+    `Upper_new_9.vtk` is `Upper_new_9_Upper_O_Pred.json`. Without this the
+    identifier ran to the end of the name -- `new_9_Upper_O_Pred` against the
+    mesh's `new_9` -- and the pair landed under two different patients, so the
+    semi-automated mode reported "no landmark file for this jaw" on the very
+    dataset this repository ships. Upstream paired them only because it
+    compared names with `in`, which is what made patient `1` match patient
+    `10`; the exact-stem rule that replaced it is right, it just has to be
+    given the right stem.
+
     Raises JawError when no token names a jaw, rather than guessing: the
     original defaulted to Lower, so a maxillary mesh named `patient1.vtk` was
     registered against the mandibular reference and returned as a success.
@@ -65,8 +77,15 @@ def patient_and_jaw(filename: str) -> tuple:
         jaw = _JAW_TOKENS.get(token.lower())
         if jaw is None:
             continue
-        parts = tokens[:index] or tokens[index + 1:]
-        return "_".join(parts) or stem, jaw
+        before = tokens[:index]
+        if before:
+            return "_".join(before), jaw
+        after = tokens[index + 1:]
+        for offset, later in enumerate(after):
+            if _JAW_TOKENS.get(later.lower()):
+                after = after[:offset]
+                break
+        return "_".join(after) or stem, jaw
     raise JawError(
         f"'{filename}': cannot tell which jaw this is. Name the files so a "
         f"token says it, e.g. 'P1_U_Seg.vtk' / 'P1_Lower.vtk' / 'Upper_gold.vtk'."
