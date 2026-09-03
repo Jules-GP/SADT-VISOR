@@ -1419,3 +1419,23 @@ def test_importing_the_package_costs_no_heavy_dependency():
                     assert not any(
                         heavy in line for heavy in ("SimpleITK", "import vtk", "numpy")
                     ), f"{name}: module-level heavy import: {line.strip()}"
+
+
+def test_the_report_names_outputs_relative_to_the_output_folder(tmp_path):
+    """The report travels to the client. A server-side job path in it is an
+    information leak, and means nothing to the caller anyway -- found by
+    reading a real API response, where every entry carried
+    `/tmp/inference_server/job_<id>/output/...`."""
+    scans = tmp_path / "in"
+    scans.mkdir()
+    _volume(scans / "a.nii.gz")
+    roi = _roi(tmp_path / "a_ROI.mrk.json", center=(5.5, 5.5, 5.5), size=(4, 4, 4))
+
+    output_dir = tmp_path / "out"
+    sadt_autocrop3d.run(scans=scans, roi=roi, output_dir=output_dir)
+
+    report = _report(output_dir)
+    for entry in report["scans"].values():
+        assert not os.path.isabs(entry["output"]), entry["output"]
+        assert (output_dir / entry["output"]).is_file()
+        assert "_absolute" not in entry

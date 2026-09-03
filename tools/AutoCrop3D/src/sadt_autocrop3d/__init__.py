@@ -143,7 +143,7 @@ def run(
                 continue
 
             report["scans"][relative] = entry
-            written.append(entry["output"])
+            written.append(entry.pop("_absolute"))
 
     report["summary"] = {
         "scans_found": len(scan_paths),
@@ -222,7 +222,10 @@ def _crop_one(scan_path, relative, single_roi, roi_by_patient, output_dir, suffi
     entry = {
         "patient": patient,
         "roi": os.path.basename(roi_path),
-        "output": str(destination),
+        # Relative to `output_dir`, never absolute: this report travels to the
+        # client, and the server's job directory is no business of its.
+        "output": str(destination.relative_to(output_dir)),
+        "_absolute": str(destination),
         "index_lower": list(lower),
         "index_upper": list(upper),
         "size": list(result.GetSize()),
