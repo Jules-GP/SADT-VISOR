@@ -82,7 +82,13 @@ def apply_to_landmarks(source: str, transform, destination: str) -> int:
     for group in markups.get("markups", []):
         for point in group.get("controlPoints", []):
             position = point.get("position")
-            if point.get("positionStatus") != "defined":
+            # Absent means "defined": that is the default Slicer's own markups
+            # schema declares, and ASO and AREG read a control point without
+            # looking at the field at all. Requiring it left a point from any
+            # writer that omits it sitting at its old coordinates in a file
+            # reported as transformed -- the family of failure this port exists
+            # to remove.
+            if point.get("positionStatus", "defined") != "defined":
                 continue
             if not isinstance(position, list) or len(position) != 3:
                 continue
