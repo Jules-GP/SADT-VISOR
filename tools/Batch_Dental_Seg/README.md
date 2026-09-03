@@ -129,16 +129,142 @@ the six files:
 - **Tolerance**: **Dice < 0.9999 against a reference is a regression**;
   above it is nnUNet's own CUDA noise floor, which the pre-port tool shares.
 
-**GPU tests were run**: `uv run pytest -m models` with the PediatricDentalSeg
-bundle on an RTX 6000 Ada -- passed. CI skips them (`-m "not gpu"`); the other 24
+**GPU tests were run**: `uv run pytest -m models` on an RTX 6000 Ada -- passed,
+with the PediatricDentalSeg bundle when this was ported and again with
+DentalSegmentator when `gpu_resampling` was added (that one runs the scan both
+ways and compares every label). CI skips them (`-m "not gpu"`); the other 38
 tests stub `nnunet_runner.predict_folder` and need no checkpoint.
+
+## GPU resampling
+
+`gpu_resampling` (default **on**) points nnUNet's two resamplers at the card
+instead of its scipy splines. AMASSS took this change first and this package
+deliberately did not, on the grounds that nothing had measured what it costs
+THESE models. This is that measurement.
+
+**Setup.** `DATA/AMASSS/testfiles/MG_test_scan.nii.gz`, one real CBCT,
+512x512x365 at 0.33 mm -- the same scan AMASSS was profiled on, so the two sets
+of numbers are comparable. RTX 6000 Ada, 48 GiB. All four bundles, one scan
+each, `tile_step_size` at its default. Every bundle's plans name nnUNet's stock
+`resample_data_or_seg_to_shape` at both ends, so the swap applies to all four.
+
+### Where the time goes
+
+Seconds, one scan. "in" is the input volume resampled to the model's grid,
+"out" the logits resampled back, "crop" the nonzero mask nnUNet crops by --
+which is NOT swapped and stays on scipy in both columns.
+
+| Bundle | classes | before | after | | in | crop | net | out |
+|---|---|---|---|---|---|---|---|---|
+| `DentalSegmentator` | 5 | **58.2** | **19.1** (3.05x) | scipy | 13.8 | 4.5 | 3.8 | 21.0 |
+| | | | | torch | 0.2 | 4.5 | 3.8 | 1.1 |
+| `PediatricDentalSeg` | 5 | **57.5** | **19.5** (2.95x) | scipy | 13.3 | 4.4 | 4.1 | 20.2 |
+| | | | | torch | 0.2 | 4.5 | 4.0 | 1.1 |
+| `NasoMaxillaDentSeg` | 6 | **70.9** | **46.4** (1.53x) | scipy | 14.0 | 4.5 | 9.5 | 24.2 |
+| | | | | torch | 0.4 | 9.7 | 11.1 | 2.5 |
+| `UniversalLab` | 55 | **278.7** | **58.4** (4.77x) | scipy | 14.2 | 4.4 | 9.0 | 189.5 |
+| | | | | torch | 0.4 | 9.0 | 10.0 | 10.9 |
+
+The before/after columns are wall clock through `segment()` on the paths the
+tool actually takes -- `predict_from_files` with its worker processes for
+scipy, `predict_from_files_sequential` for torch. The per-phase columns come
+from separate sequential runs, because the worker path does its resampling in
+processes this one cannot time.
+
+Three things that table says:
+
+- **The network was never the cost.** Resampling outweighs it 4x on Naso, 8-9x
+  on the two five-segment bundles and **23x on UniversalLab**, where one
+  resampling of 55 probability channels takes 190 seconds on one core.
+- **UniversalLab is the bundle that needed this most**, and it is the one the
+  original decision deferred. 4.6 minutes a scan becomes 58 seconds.
+- **Naso gains least (1.53x)** because the residual scipy call -- the crop mask,
+  which is not swapped -- roughly doubles on the torch path, from 4.5 s to
+  9.7 s, and its network is genuinely slower (a 192x256x256 patch). Swapping
+  `resampling_fn_seg` as well is the obvious next thing to measure; it is not
+  done here because AMASSS did not, and matching AMASSS exactly is what let
+  this be a measurement of one change.
+
+### What it costs, per label
+
+Dice against the scipy pipeline on the same scan, **plus a repeated scipy run**
+so the comparison is read against nnUNet's own CUDA noise rather than against
+zero. Volumes are the label volume differences in mm3, at 0.0359 mm3 a voxel.
+
+| Bundle | scipy vs scipy (floor) | scipy vs torch, worst label | mean |
+|---|---|---|---|
+| `DentalSegmentator` | **bit-identical** | 0.9912 Mandibular canal (+8 mm3) | 0.9945 |
+| `PediatricDentalSeg` | 0.99998 | 0.9928 Mandibular canal (+6 mm3) | 0.9958 |
+| `NasoMaxillaDentSeg` | 0.99994 | 0.9914 Upper Skull (+602 mm3) | 0.9944 |
+| `UniversalLab` | 0.99988 | 0.9934 Mandibular canal (+5 mm3) | 0.9970 |
+
+The floor being ~0.9999 -- and bit-identical for one bundle -- is what makes
+the attribution clean: the 0.991 is the resampler, not the card.
+
+`UniversalLab` labels 55 structures and 31 were present in this scan. Its worst
+ten, all of them thin midline structures:
+
+| Dice | Label | dV (mm3) | max surface deviation |
+|---|---|---|---|
+| 0.9934 | Mandibular canal | +5.0 | 0.33 mm |
+| 0.9945 | Lower-left central incisor | -2.4 | 0.33 mm |
+| 0.9947 | Maxilla | +734.0 | 3.13 mm |
+| 0.9948 | Lower-right lateral incisor | +0.8 | 0.33 mm |
+| 0.9953 | Lower-right central incisor | +0.9 | 0.57 mm |
+| 0.9953 | Upper-left central incisor | +3.6 | 0.33 mm |
+| 0.9966 | Upper-right central incisor | +1.1 | 0.33 mm |
+| 0.9968 | Lower-left lateral incisor | +0.7 | 0.33 mm |
+| 0.9968 | Mandible | +185.1 | 0.66 mm |
+| 0.9972 | Upper-left lateral incisor | +0.4 | 0.33 mm |
+
+Most maximum deviations are 0.33 mm, which is one voxel of this scan -- the
+boundary moved by a voxel in places, which is what dropping the input
+interpolation from cubic to linear does. The larger ones (Maxilla 3.13 mm,
+Naso's Upper Skull 7.79 mm) are on structures whose boundary runs along the
+edge of the field of view, the same place AMASSS's cervical vertebra was the
+outlier.
+
+**Against AMASSS's numbers, which is the comparison that licensed this:** its
+worst was the cervical vertebra at 0.978 and its cranial base at 0.991. No
+bundle here is worse than 0.991, and three of the four are better than AMASSS's
+second-worst.
+
+### Why it is on by default anyway, and when to turn it off
+
+On, for all four bundles: every one gains (1.5x to 4.8x), no label of any
+bundle falls below what AMASSS already accepted, and the largest win is on the
+bundle that is otherwise unusable interactively.
+
+**Memory is the one reason to turn it off, and it is UniversalLab's alone.**
+Peak VRAM, one scan:
+
+| Bundle | scipy | torch |
+|---|---|---|
+| `DentalSegmentator` | 2.8 GiB | 4.1 GiB |
+| `PediatricDentalSeg` | 2.6 GiB | 4.1 GiB |
+| `NasoMaxillaDentSeg` | 10.9 GiB | 10.9 GiB |
+| `UniversalLab` | 15.5 GiB | **37.1 GiB** |
+
+Resampling 55 probability channels on the card is what does that. It fits on a
+48 GiB card with room for nothing else, so:
+
+- on a card smaller than ~40 GiB, pass `gpu_resampling=false` for
+  **UniversalLab**; the other three want ~4 GiB and are unaffected;
+- two concurrent UniversalLab runs will not fit on one 48 GiB card either way,
+  which is the server's `MAX_CONCURRENT_GPU_JOBS`, not this argument.
+
+**The report records it.** `BatchDentalSeg_report.json` carries
+`"gpu_resampling": true|false` beside `tile_step_size`, because a result
+produced this way is not bit-identical to nnUNet's own pipeline and whoever
+opens a segmentation has to be able to tell which one made it. It reads false
+on a CPU run whatever was asked for.
 
 ## Working on it
 
 ```bash
 cd tools/Batch_Dental_Seg
 uv sync                    # ~7.2 GB, CUDA wheels
-uv run pytest -m "not gpu" # 24 tests, no GPU and no checkpoints needed
+uv run pytest -m "not gpu" # 38 tests, no GPU and no checkpoints needed
 uv run pytest -m models    # a real bundle, see tests/data/README.md
 ```
 
