@@ -1223,3 +1223,115 @@ def test_the_real_model_answers_with_json(tmp_path):
 
     data = json.loads((output / "Extraction_note.txt.json").read_text())
     assert isinstance(data, dict) and data
+
+
+# ---------------------------------------------------------------------------
+# What the published fine-tune actually answers
+#
+# Found by running the real 4.4 GB TMJ model through the API: it emits 46
+# `key: value` lines and no JSON at all. The first port refused every one of
+# them, because upstream reached that shape only through its raw-answer
+# fallback -- so what looked like a defect ("a truncated blob written as if it
+# were the result") is, for this model, the normal path.
+# ---------------------------------------------------------------------------
+
+REAL_TMJ_ANSWER = """patient_id: unknown
+patient_age: 34
+maximum_opening: 38mm
+jaw_locking: false
+onset_triggers: motor vehicle accident 3 years ago with whiplash
+muscle_pain_location: right masseter | right temporalis
+disc_displacement: right tmj anterior displacement with reduction
+average_daily_pain_intensity: 6/10
+pain_relieving_factors: unknown
+pain_relieving_factors: nsaids
+"""
+
+
+def test_the_real_models_key_value_answer_is_an_extraction():
+    data = extraction.parse_extraction(REAL_TMJ_ANSWER)
+    assert data is not None
+    assert data["patient_age"] == "34"
+    assert data["maximum_opening"] == "38mm"
+    assert data["muscle_pain_location"] == "right masseter | right temporalis"
+
+
+def test_a_repeated_field_keeps_the_first_value_not_the_last():
+    """The published fine-tune repeats `pain_relieving_factors` in one answer.
+    A plain dict build keeps whichever came last, silently."""
+    data = extraction.parse_extraction(REAL_TMJ_ANSWER)
+    assert data["pain_relieving_factors"] == "unknown"
+
+
+def test_every_field_of_a_long_real_answer_survives():
+    data = extraction.parse_extraction(REAL_TMJ_ANSWER)
+    assert len(data) == 9          # ten lines, one of them a repeat
+
+
+def test_json_is_still_preferred_when_the_model_produces_it():
+    data = extraction.parse_extraction('Here you go: {"patient_age": 34} hope that helps')
+    assert data == {"patient_age": 34}
+
+
+def test_prose_is_not_mistaken_for_an_extraction():
+    """A clinical note is full of `WORD: text` lines. Reading one as fields
+    would write the note back out as if the model had extracted it."""
+    note = (
+        "CHIEF COMPLAINT: Right TMJ pain for 8 months.\n"
+        "HISTORY: 34-year-old patient reports clicking on opening.\n"
+        "EXAM: Maximum unassisted opening 38 mm. Deviation to the right.\n"
+        "IMAGING: MRI shows anterior disc displacement with reduction.\n"
+    )
+    assert extraction.parse_extraction(note) is None
+
+
+def test_an_uppercase_heading_is_not_a_field():
+    assert extraction.parse_extraction("ASSESSMENT: right TMJ derangement\n") is None
+
+
+def test_one_field_line_buried_in_prose_is_not_an_extraction():
+    answer = (
+        "I looked at the note and here is what I found.\n"
+        "The patient is thirty-four years old and reports pain.\n"
+        "patient_age: 34\n"
+        "That is all I could determine from the text provided.\n"
+    )
+    assert extraction.parse_extraction(answer) is None
+
+
+def test_a_field_name_written_with_spaces_becomes_an_identifier():
+    data = extraction.parse_extraction("patient age: 34\njaw locking: false\n")
+    assert data == {"patient_age": "34", "jaw_locking": "false"}
+
+
+def test_a_value_containing_a_colon_keeps_all_of_it():
+    data = extraction.parse_extraction(
+        "pain_onset_date: 2019-04-01\nnote: seen at 09:30 by Dr. A\ncomment: ok\n")
+    assert data["note"] == "seen at 09:30 by Dr. A"
+
+
+def test_a_field_with_an_empty_value_is_not_a_field():
+    assert extraction.parse_extraction("patient_age:\njaw_locking:\n") is None
+
+
+def test_an_empty_answer_is_no_extraction():
+    assert extraction.parse_extraction("") is None
+    assert extraction.parse_extraction("   \n\n  ") is None
+
+
+def test_a_single_object_in_an_array_is_read_as_that_object():
+    """Upstream slices between the first `{` and the last `}` because the
+    fine-tunes wrap their JSON in a sentence. A one-element array falls out of
+    that slicing, and reading it is right."""
+    assert extraction.parse_extraction('[{"patient_age": 34}]') == {"patient_age": 34}
+
+
+def test_an_array_of_several_objects_is_refused_rather_than_spanned():
+    """The same slicing over two objects gives `{...}, {...}`, which is not
+    valid JSON -- so it is refused rather than half-read."""
+    assert extraction.parse_extraction('[{"patient_age": 34}, {"patient_age": 51}]') is None
+
+
+def test_blank_lines_between_fields_do_not_break_the_ratio():
+    data = extraction.parse_extraction("patient_age: 34\n\n\njaw_locking: false\n")
+    assert data == {"patient_age": "34", "jaw_locking": "false"}

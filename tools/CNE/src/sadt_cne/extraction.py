@@ -26,6 +26,7 @@ Ported from `CNE_CLI/CNE_CLI.py`'s inference block (`:141-251`). What differs:
 import contextlib
 import io
 import json
+import re
 import logging
 import os
 from pathlib import Path
@@ -196,18 +197,43 @@ def complete(model, messages: list, max_tokens: int, temperature: float) -> tupl
     return (content or "").strip(), choice.get("finish_reason")
 
 
-def parse_extraction(answer: str):
-    """The JSON object in the model's answer, or None.
+# What a `key: value` line looks like. The key is a field name, so it is
+# lowercase words and underscores and nothing else -- deliberately narrow, so
+# that a sentence containing a colon ("ASSESSMENT: right TMJ derangement") is
+# not read as a field.
+_FIELD_LINE = re.compile(r"^\s*([a-z][a-z0-9_ ]{0,60}?)\s*:\s*(.+?)\s*$")
 
-    The fine-tunes wrap their JSON in a sentence often enough that upstream
-    already sliced between the first `{` and the last `}`; that is kept. What is
-    not kept is the fallback: upstream wrote the raw answer to disk whenever the
-    parse failed, so a truncated or chatty answer landed in the output folder
-    looking exactly like a successful extraction. None means "no extraction
-    here", and the caller writes nothing.
+# How much of the answer has to look like fields before it is treated as one.
+# A model that answers in prose with one stray `note: ...` line has not
+# produced an extraction.
+_FIELD_LINE_RATIO = 0.6
+
+
+def parse_extraction(answer: str):
+    """The structured extraction in the model's answer, or None.
+
+    Two shapes, because the fine-tunes produce two. JSON is tried first --
+    the fine-tunes wrap it in a sentence often enough that upstream already
+    sliced between the first `{` and the last `}`, and that is kept. Failing
+    that, the answer is read as `key: value` lines, which is what the
+    published TMJ fine-tune actually emits: 46 fields, no JSON anywhere.
+
+    Upstream reached the same two shapes by accident -- it parsed JSON and
+    wrote the RAW ANSWER when that failed -- which happened to work for the
+    plain-text model and silently wrote a truncated blob for everything else.
+    Here both shapes are parsed, and anything that is neither is None, which
+    means "no extraction here" and the caller writes nothing.
     """
     if not answer:
         return None
+    parsed = _parse_json_object(answer)
+    if parsed is not None:
+        return parsed
+    return _parse_field_lines(answer)
+
+
+def _parse_json_object(answer: str):
+    """The JSON object in the answer, or None."""
     start = answer.find("{")
     end = answer.rfind("}") + 1
     if start == -1 or end == 0 or end <= start:
@@ -221,6 +247,32 @@ def parse_extraction(answer: str):
     if EXTRACTION_KEY in data and isinstance(data[EXTRACTION_KEY], dict):
         data = data[EXTRACTION_KEY]
     return data or None
+
+
+def _parse_field_lines(answer: str):
+    """`key: value` lines, or None if the answer is not mostly fields.
+
+    A repeated key keeps its FIRST value rather than its last. The published
+    TMJ fine-tune repeats `pain_relieving_factors` in a single answer, and a
+    plain dict build would silently keep whichever came last.
+    """
+    lines = [line for line in answer.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    data = {}
+    matched = 0
+    for line in lines:
+        found = _FIELD_LINE.match(line)
+        if not found:
+            continue
+        matched += 1
+        key = found.group(1).strip().replace(" ", "_")
+        data.setdefault(key, found.group(2).strip())
+
+    if not data or matched < _FIELD_LINE_RATIO * len(lines):
+        return None
+    return data
 
 
 def render_extraction(data: dict) -> str:
