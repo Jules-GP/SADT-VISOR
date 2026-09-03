@@ -12,6 +12,7 @@ linearly invents labels that were never in it.
 
 import json
 import logging
+import os
 
 logger = logging.getLogger("AutoMatrix")
 
@@ -125,6 +126,45 @@ def resample(image, transform, reference=None, is_segmentation: bool = False):
 
 
 def read_transform(path: str):
+    """A transform, whichever of the two shapes it was written in.
+
+    ITK's own formats (`.tfm`, `.h5`, and the MATLAB `.mat` ITK writes) are
+    read by `sitk.ReadTransform`. Greedy writes something else: a bare 4x4
+    matrix, four lines of numbers, and calls it `.mat` -- so does upstream's
+    own `writeIdentityInit`. `ReadTransform` refuses it with a MatlabTransformIO
+    error, which is why AutoMatrix could not consume what GreedyReg produced.
+
+    The extension does not say which it is, so the plain matrix is the
+    fallback rather than a branch on the name.
+    """
     import SimpleITK as sitk
 
-    return sitk.ReadTransform(path)
+    try:
+        return sitk.ReadTransform(path)
+    except RuntimeError as itk_error:
+        matrix = _read_plain_matrix(path)
+        if matrix is None:
+            raise RuntimeError(
+                f"{os.path.basename(path)} is neither an ITK transform nor a "
+                f"4x4 matrix in text. ITK said: {itk_error}"
+            ) from itk_error
+        affine = sitk.AffineTransform(3)
+        affine.SetMatrix([value for row in matrix[:3] for value in row[:3]])
+        affine.SetTranslation([row[3] for row in matrix[:3]])
+        return affine
+
+
+def _read_plain_matrix(path: str):
+    """A 4x4 matrix written as four lines of numbers, or None."""
+    try:
+        with open(path) as handle:
+            rows = [
+                [float(value) for value in line.split()]
+                for line in handle
+                if line.strip()
+            ]
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if len(rows) != 4 or any(len(row) != 4 for row in rows):
+        return None
+    return rows

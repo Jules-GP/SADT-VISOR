@@ -117,10 +117,23 @@ def run(
     report["duration_seconds"] = round(time.monotonic() - started, 2)
 
     if not written:
+        # The reason a caller needs is WHY nothing was written, and the two
+        # cases read differently: nothing paired, or everything that paired
+        # then failed. Reporting only the counts hid a transform SimpleITK
+        # could not read behind "0 file(s) had no transform".
+        failures = [
+            message
+            for detail in report["patients"].values()
+            for message in detail.get("failed", [])
+        ]
         raise ValueError(
             "AutoMatrix transformed nothing. "
-            f"{len(report['without_a_transform'])} file(s) had no transform, "
-            f"{len(report['transforms_without_a_file'])} transform(s) had no file."
+            + (
+                "; ".join(failures[:5])
+                if failures
+                else f"{len(report['without_a_transform'])} file(s) had no transform, "
+                     f"{len(report['transforms_without_a_file'])} transform(s) had no file."
+            )
         )
 
     (output_dir / "AutoMatrix_report.json").write_text(json.dumps(report, indent=2))

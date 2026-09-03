@@ -180,3 +180,45 @@ def test_the_input_tree_is_mirrored(tmp_path):
                               output_dir=tmp_path / "out")
 
     assert list((out / "siteA").glob("*.nii.gz")), "the subfolder was flattened"
+
+
+# ---------------------------------------------------------------------------
+# The two shapes a transform arrives in
+# ---------------------------------------------------------------------------
+
+def test_a_bare_4x4_matrix_is_read(tmp_path):
+    """Greedy writes four lines of numbers and calls it `.mat`; so does
+    upstream's own `writeIdentityInit`. `sitk.ReadTransform` refuses it with a
+    MatlabTransformIO error, which is why AutoMatrix could not consume what
+    GreedyReg produced."""
+    path = tmp_path / "P1_transform.mat"
+    path.write_text("1 0 0 3.5\n0 1 0 0\n0 0 1 0\n0 0 0 1\n")
+
+    transform = pipeline.read_transform(str(path))
+
+    assert transform.TransformPoint((0.0, 0.0, 0.0)) == pytest.approx([3.5, 0.0, 0.0])
+
+
+def test_an_itk_transform_is_still_read(tmp_path):
+    path = _transform(tmp_path / "P1_transform.tfm", (2.0, 0.0, 0.0))
+    assert pipeline.read_transform(str(path)).TransformPoint((0.0, 0.0, 0.0)) == pytest.approx([2.0, 0, 0])
+
+
+def test_a_file_that_is_neither_says_so(tmp_path):
+    path = tmp_path / "P1_transform.mat"
+    path.write_text("this is not a transform\n")
+
+    with pytest.raises(RuntimeError, match="neither an ITK transform nor a 4x4 matrix"):
+        pipeline.read_transform(str(path))
+
+
+def test_the_refusal_carries_why_nothing_was_written(tmp_path):
+    """Reporting only the counts hid a transform SimpleITK could not read
+    behind "0 file(s) had no transform"."""
+    _volume(tmp_path / "in" / "P1_T1.nii.gz")
+    (tmp_path / "tfm").mkdir()
+    (tmp_path / "tfm" / "P1_transform.tfm").write_text("not a transform at all")
+
+    with pytest.raises(ValueError, match="neither an ITK transform"):
+        sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                            output_dir=tmp_path / "out")
