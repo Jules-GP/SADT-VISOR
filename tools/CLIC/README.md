@@ -33,6 +33,13 @@ machine; the 110 that compute are what this package holds.
 - **One scan failing costs one scan.** Upstream ran one process per scan from
   the panel, so it never had to say this; the loop is inside the tool now, and a
   failure is recorded per scan.
+- **The output mirrors the input tree.** A cohort is exported one folder per
+  patient and every scan inside is called the same thing, so naming the output
+  after the base name alone wrote both of them to `scan_seg.nii.gz`: one
+  patient's segmentation silently replaced another's while the report said both
+  had been segmented. Scans are keyed by their path relative to the input root,
+  and that is the path the report carries. A single file named directly is its
+  own root and lands straight in `output_dir`.
 - **`score_threshold` is an argument.** Hardcoded to 0.7 upstream. It is the one
   knob that moves the segmentation, so a caller comparing two runs has to be
   able to say which value produced which -- and it is recorded in the report.
@@ -42,9 +49,9 @@ machine; the 110 that compute are what this package holds.
 ## Reporting
 
 `CLIC_report.json` carries the model, the class count, the device, the
-threshold, and per scan: the slice count, how many detections cleared the
-threshold, the labels actually present in the output, and a note when nothing
-cleared it. That last one matters: an empty segmentation is a legitimate answer
+threshold, and per scan: its path relative to the input root, the slice count,
+how many detections cleared the threshold, the labels actually present in the
+output, and a note when nothing cleared it. That last one matters: an empty segmentation is a legitimate answer
 AND the signature of a wrong checkpoint, and only the caller can tell them
 apart.
 
@@ -53,8 +60,20 @@ apart.
 ```bash
 cd tools/CLIC
 uv sync
-uv run pytest -m "not gpu"
+uv run pytest                                    # 127 tests, no GPU and no checkpoint
 .venv/bin/python ../../scripts/describe.py .     # the schema the server publishes
+```
+
+The `gpu` and `models` markers are **deselected** by the default run rather
+than skipped: a suite whose green line is half skips says nothing. The two
+`models` tests are the only claims a stub cannot make -- that the real 176 MB
+checkpoint loads into the heads the class count read out of it, and that the
+real detector's output dict is the one `segment_volume` indexes. Run them by
+hand and report the result in the pull request:
+
+```bash
+SADT_CLIC_MODEL=../../../VISOR-serve/DATA/CLIC/models/final_model.pth \
+    uv run pytest -m models -o addopts=
 ```
 
 ## Data

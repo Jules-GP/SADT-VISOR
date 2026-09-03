@@ -3,7 +3,6 @@
 import json
 import os
 import sys
-import types
 
 import numpy as np
 import pytest

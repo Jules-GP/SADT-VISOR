@@ -103,8 +103,20 @@ def class_count(state_dict) -> int:
     """
     for key in ("roi_heads.box_predictor.cls_score.bias",
                 "roi_heads.box_predictor.cls_score.weight"):
-        if key in state_dict:
-            return int(state_dict[key].shape[0])
+        if key not in state_dict:
+            continue
+        shape = tuple(int(size) for size in state_dict[key].shape)
+        if not shape or shape[0] < 1:
+            # A present but malformed entry used to reach `shape[0]` and raise
+            # `IndexError: tuple index out of range`, which names neither the
+            # key nor the checkpoint. The reason a file cannot be loaded has to
+            # survive as far as the caller.
+            raise ValueError(
+                f"`{key}` has shape {shape} in this checkpoint, so no class "
+                f"count can be read from it: a Mask R-CNN box predictor's "
+                f"classification head has one entry per class."
+            )
+        return shape[0]
     raise ValueError(
         "This checkpoint has no `roi_heads.box_predictor.cls_score` entry, so it "
         "is not a Mask R-CNN box predictor this tool can load."
