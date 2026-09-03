@@ -24,9 +24,11 @@ Changes made by this port:
   `ALILogic.ensure_segmented()` could import it and segment raw meshes inline.
   Tools do not call each other any more, so the server sequences CrownSeg before
   ALI, and the report's `segmented_meshes` list is what it reads to do it.
-- **Scratch space lives under `output_dir`** (`.crownseg_work/`, removed before
-  returning), and `segment_crowns()` returns the run report rather than a
-  `CrownSegRun`.
+- **Scratch space lives under `output_dir`** (`.crownseg_work/`, removed in a
+  `finally` so it goes whichever way the run ends -- it holds a csv listing the
+  patient's own file paths), and `segment_crowns()` returns the run report
+  rather than a `CrownSegRun`. Arguments are validated *before* anything is
+  created, so a refused request leaves `output_dir` exactly as it found it.
 - **Zip extraction removed** -- the server unpacks archives before `run()`.
 - **The model is a required argument.** It used to be a name resolved through
   the data store, with `default_model_path()` reading `settings.CROWNSEG_MODEL`;
@@ -59,7 +61,7 @@ that it does nothing when the name is already there.
 | | |
 |---|---|
 | Inputs | `meshes`: one `.vtk`/`.stl` surface or a folder of them, searched recursively. `model`: the checkpoint. `output_dir`: where results go. |
-| Outputs | One labelled `.vtk` per mesh, mirroring the input tree, plus `run_report.json`. |
+| Outputs | One labelled `.vtk` per mesh, named `<stem>_<suffix>.vtk`, plus `run_report.json`. The input tree is mirrored under `output_dir`; the meshes the network actually ran on are filed one level down, under `crownseg_input_<suffix>/`, which is shapeaxi's own csv-branch layout. `run_report.json` names every output, so a caller never has to know which branch a mesh took. |
 | Model files | One checkpoint, `07-21-22_val-loss0.169.pth` (6.6 MB), from the Fly-by-CNN 3.0 release. |
 | GPU | Used when available; `device="cpu"` works and is much slower. |
 
@@ -207,19 +209,29 @@ port         930    2607     826       0
   them (826-2 607) is the same range. **Treat a difference in `PredictedID` as a
   regression**; `Universal_ID` alone is this noise floor.
 
-**GPU tests**: `test_real_model_labels_a_real_mesh` is marked `gpu`/`models` and
-needs the extra. It was exercised through the run above rather than through
-pytest, because pytorch3d cannot be built on this workstation -- no CUDA toolkit.
-The 23 other tests stub the engine and run anywhere, which is what CI does.
+**GPU tests**: four tests are marked `models`, two of them also `gpu`, and both
+markers are **deselected by default** (`addopts = "-m 'not gpu and not models'"`)
+rather than skipped -- a green line that is half skips says nothing. They now run
+through pytest rather than by hand: pytorch3d arrives as a prebuilt wheel, so
+there is no CUDA toolkit to want. Last run, on the real checkpoint and
+`T1_01_U_segmented.vtk`:
+
+```
+SADT_CROWNSEG_MODEL=.../07-21-22_val-loss0.169.pth \
+SADT_CROWNSEG_MESH=.../T1_01_U_segmented.vtk \
+uv run pytest -m models -o addopts=      # 4 passed in 119s
+```
+
+The other 176 tests stub the engine and run anywhere, which is what CI does.
 
 ## Working on it
 
 ```bash
 cd tools/Crown_Seg
 uv sync                          # fast: no shapeaxi, no pytorch3d
-uv run pytest                    # 23 tests, engine stubbed
-uv sync --extra segmentation     # compiles pytorch3d, needs nvcc
-uv run pytest -m models          # see tests/data/README.md
+uv run pytest                    # 176 tests, engine stubbed
+uv sync --extra segmentation     # prebuilt pytorch3d wheel, nothing compiles
+uv run pytest -m models -o addopts=   # see tests/data/README.md
 ```
 
 ```bash

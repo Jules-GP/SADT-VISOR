@@ -289,15 +289,49 @@ def segment_crowns(
     suffix = (suffix or DEFAULT_SUFFIX).strip() or DEFAULT_SUFFIX
 
     output_dir = os.fspath(output_dir)
-    work_dir = os.path.join(output_dir, WORK_DIRNAME)
-    os.makedirs(work_dir, exist_ok=True)
 
+    # Validated BEFORE anything is created. A request the tool refuses must
+    # leave the caller's output directory exactly as it found it -- the
+    # checkpoint check and discovery both answer 422, and a 422 that has
+    # already written a scratch folder into the response's own directory is a
+    # refusal that made a mess.
     if not os.path.isfile(os.fspath(model_path)):
         raise ToolInputError(f"Crown-segmentation checkpoint not found: {model_path}")
 
     meshes = discover_meshes(os.fspath(input_path))
     input_root = _input_root(os.fspath(input_path), meshes)
 
+    work_dir = os.path.join(output_dir, WORK_DIRNAME)
+    os.makedirs(work_dir, exist_ok=True)
+    try:
+        return _segment(
+            meshes=meshes,
+            input_root=input_root,
+            model_path=model_path,
+            output_dir=output_dir,
+            work_dir=work_dir,
+            array_name=array_name,
+            suffix=suffix,
+            fdi=fdi,
+            skip_segmented=skip_segmented,
+            device=device,
+            num_workers=num_workers,
+            started_at=started_at,
+        )
+    finally:
+        # `finally`, not "after the run and again in an except": the scratch
+        # directory used to survive every error path that was not shapeaxi's
+        # own, and it holds a csv listing the patient's file paths.
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _segment(meshes, input_root, model_path, output_dir, work_dir, array_name, suffix,
+             fdi, skip_segmented, device, num_workers, started_at) -> dict:
+    """The run itself, once the arguments are known to be usable.
+
+    Split out so `segment_crowns` can own the scratch directory's lifetime in
+    one `try/finally` instead of repeating the cleanup on each way out.
+    """
     already_segmented, to_segment = [], []
     for mesh in meshes:
         (already_segmented if skip_segmented and is_segmented(mesh) else to_segment).append(mesh)
@@ -367,21 +401,17 @@ def segment_crowns(
                 handle.write(f"{mesh}\n")
 
         logger.info("CrownSeg: segmenting %d mesh(es) on %s", len(to_segment), device)
-        try:
-            _run_shapeaxi(
-                csv_path=csv_path,
-                output_dir=output_dir,
-                model_path=os.fspath(model_path),
-                input_root=input_root,
-                array_name=array_name,
-                suffix=suffix,
-                device=device,
-                fdi=fdi,
-                num_workers=num_workers,
-            )
-        except Exception:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            raise
+        _run_shapeaxi(
+            csv_path=csv_path,
+            output_dir=output_dir,
+            model_path=os.fspath(model_path),
+            input_root=input_root,
+            array_name=array_name,
+            suffix=suffix,
+            device=device,
+            fdi=fdi,
+            num_workers=num_workers,
+        )
 
         csv_stem = os.path.splitext(os.path.basename(csv_path))[0]
         for mesh in to_segment:
@@ -396,8 +426,6 @@ def segment_crowns(
                     "status": "failed",
                     "error": "the segmentation produced no output for this mesh",
                 }
-
-    shutil.rmtree(work_dir, ignore_errors=True)
 
     if not produced:
         raise RuntimeError("CrownSeg produced no segmented mesh for any input.")
