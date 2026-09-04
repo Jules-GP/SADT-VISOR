@@ -1,0 +1,254 @@
+"""The catalogue: where it comes from, and what shapes are refused.
+
+This is the port's one design change, so it gets the strictest tests. The
+catalogue is an INPUT whose default source is the live registry, and every way
+of getting one wrong has to say which way.
+"""
+
+import io
+import json
+
+import pytest
+
+from sadt_agent import catalog
+from sadt_agent.errors import CatalogError
+
+from conftest import CATALOG
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def test_a_catalog_file_is_read_and_its_source_named(catalog_file):
+    tools, source = catalog.load_catalog(catalog_file)
+    assert [tool["name"] for tool in tools] == [tool["name"] for tool in CATALOG]
+    assert source.startswith("file:")
+
+
+def test_a_missing_catalog_file_names_the_file(tmp_path):
+    with pytest.raises(CatalogError) as raised:
+        catalog.load_catalog(tmp_path / "nowhere.json")
+    assert "nowhere.json" in str(raised.value)
+
+
+def test_a_catalog_file_that_is_not_json_says_so(tmp_path):
+    path = tmp_path / "catalog.json"
+    path.write_text("scripts:\n  - name: ali_cbct\n", encoding="utf-8")
+    with pytest.raises(CatalogError) as raised:
+        catalog.load_catalog(path)
+    assert "not valid JSON" in str(raised.value)
+
+
+def test_with_no_catalog_and_no_registry_both_ways_forward_are_named(monkeypatch):
+    """The refusal has to say what to do, because there are exactly two options
+    and a caller outside a server only has one of them."""
+    monkeypatch.delenv(catalog.API_ENV, raising=False)
+    with pytest.raises(CatalogError) as raised:
+        catalog.load_catalog("")
+    message = str(raised.value)
+    assert "catalog" in message and catalog.API_ENV in message
+
+
+def test_the_live_registry_is_the_default_source(monkeypatch):
+    """The whole design change: with no `catalog` argument the tool reads the
+    server's own GET /tools, which is generated from each tool's signature and
+    cannot drift from it."""
+    monkeypatch.setenv(catalog.API_ENV, "http://127.0.0.1:8000")
+    seen = {}
+
+    def fake_urlopen(url, timeout=None):
+        seen["url"] = url
+        seen["timeout"] = timeout
+        return io.BytesIO(json.dumps(CATALOG).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    tools, source = catalog.load_catalog("", timeout_seconds=7)
+
+    assert seen["url"] == "http://127.0.0.1:8000/tools"
+    assert seen["timeout"] == 7
+    assert len(tools) == len(CATALOG)
+    assert source == "registry:http://127.0.0.1:8000"
+
+
+def test_a_catalog_file_wins_over_the_registry(monkeypatch, catalog_file):
+    """Explicit beats ambient, so a test or an offline run is never at the mercy
+    of whatever the environment happens to point at."""
+    monkeypatch.setenv(catalog.API_ENV, "http://127.0.0.1:8000")
+    _tools, source = catalog.load_catalog(catalog_file)
+    assert source.startswith("file:")
+
+
+def test_an_unreachable_registry_names_the_url_and_the_alternative(monkeypatch):
+    monkeypatch.setenv(catalog.API_ENV, "http://127.0.0.1:9")
+
+    def refuse(url, timeout=None):
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse)
+    with pytest.raises(CatalogError) as raised:
+        catalog.load_catalog("")
+    message = str(raised.value)
+    assert "http://127.0.0.1:9/tools" in message
+    assert "catalog" in message
+
+
+def test_no_token_is_sent_to_the_registry(monkeypatch):
+    """GET /tools needs none, and the server strips API_TOKEN from a tool's
+    environment on purpose. A tool that sent one would be relying on something
+    it is not given."""
+    monkeypatch.setenv(catalog.API_ENV, "http://127.0.0.1:8000")
+    captured = {}
+
+    def fake_urlopen(url, timeout=None):
+        captured["url"] = url
+        return io.BytesIO(b"[]")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(CatalogError):
+        catalog.load_catalog("")
+    assert isinstance(captured["url"], str)  # a plain URL, not a Request with headers
+
+
+# ---------------------------------------------------------------------------
+# Shapes
+# ---------------------------------------------------------------------------
+
+def test_both_published_shapes_of_get_tools_are_accepted():
+    assert len(catalog.normalise(CATALOG)) == len(CATALOG)
+    assert len(catalog.normalise({"tools": CATALOG})) == len(CATALOG)
+
+
+def test_an_empty_catalog_is_refused_rather_than_routed_against():
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise([])
+    assert "no tools" in str(raised.value)
+
+
+def test_a_catalog_that_is_not_a_list_says_what_it_got():
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise(42)
+    assert "int" in str(raised.value)
+
+
+def test_a_tool_with_no_name_is_refused():
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise([{"description": "x", "arguments": {}}])
+    assert "no 'name'" in str(raised.value)
+
+
+def test_two_spellings_of_one_tool_name_are_refused():
+    """The same rule the server's registry applies at startup. Routing to the
+    wrong spelling picks the wrong schema and fills the wrong parameters."""
+    entries = [
+        {"name": "Batch_Dental_Seg", "arguments": {}},
+        {"name": "BatchDentalSeg", "arguments": {}},
+    ]
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise(entries)
+    assert "same tool name" in str(raised.value)
+
+
+def test_an_argument_with_no_name_is_refused_rather_than_becoming_one_phantom():
+    """Upstream's `complete_with_defaults` keyed defaults on `p.get("name", "")`
+    over a LIST of parameter objects, so every parameter that happened to lack a
+    name collapsed into a single `""` entry and was then injected into the
+    proposal as an argument no tool declares. A mapping keyed by name cannot
+    express that shape, and an empty key is refused outright."""
+    entries = [{"name": "T", "arguments": {"": {"type": "str"}}}]
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise(entries)
+    assert "empty name" in str(raised.value)
+
+
+def test_arguments_as_a_list_is_refused_and_says_what_is_wanted():
+    """Upstream's manifest shape. Accepting it would reintroduce the nameless
+    parameter the test above closes."""
+    entries = [{"name": "T", "arguments": [{"name": "scans", "type": "path"}]}]
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise(entries)
+    assert "keyed by argument name" in str(raised.value)
+
+
+def test_an_argument_with_no_type_is_refused():
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise([{"name": "T", "arguments": {"a": {}}}])
+    assert "no 'type'" in str(raised.value)
+
+
+def test_an_unknown_type_is_refused_and_lists_the_known_ones():
+    """A type this agent cannot fill would be proposed as a value of unknown
+    shape and 422'd by the server. Better said here."""
+    entries = [{"name": "T", "arguments": {"a": {"type": "dict[str, path]"}}}]
+    with pytest.raises(CatalogError) as raised:
+        catalog.normalise(entries)
+    assert "list[path]" in str(raised.value)
+
+
+def test_every_type_describe_py_can_emit_is_accepted():
+    arguments = {
+        name.replace("[", "_").replace("]", ""): {"type": name}
+        for name in catalog.KNOWN_TYPES
+    }
+    tools = catalog.normalise([{"name": "T", "arguments": arguments}])
+    assert len(tools[0]["arguments"]) == len(catalog.KNOWN_TYPES)
+
+
+def test_the_supervisor_flag_travels():
+    tools = catalog.normalise([{"name": "T", "arguments": {}, "supervisor": True}])
+    assert tools[0]["supervisor"] is True
+
+
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
+
+def test_a_tool_is_found_by_its_exact_name():
+    tools = catalog.normalise(CATALOG)
+    assert catalog.find_tool(tools, "Bone_Seg")["name"] == "Bone_Seg"
+
+
+def test_a_tool_is_found_through_separators_and_case():
+    """A model answers `boneseg` or `bone seg` often enough that refusing it
+    would throw away good routings; the comparison is the server's own."""
+    tools = catalog.normalise(CATALOG)
+    for spelling in ("boneseg", "BONE_SEG", "bone-seg", "Bone Seg"):
+        assert catalog.find_tool(tools, spelling)["name"] == "Bone_Seg"
+
+
+def test_a_name_no_tool_carries_resolves_to_nothing():
+    tools = catalog.normalise(CATALOG)
+    assert catalog.find_tool(tools, "Definitely_Not_A_Tool") is None
+    assert catalog.find_tool(tools, "") is None
+    assert catalog.find_tool(tools, None) is None
+
+
+def test_output_dir_is_never_offered_to_the_model():
+    """It is filled at dispatch with the job's own output folder, and a model
+    proposing one is proposing a write outside the job."""
+    tools = catalog.normalise(CATALOG)
+    for tool in tools:
+        assert "output_dir" not in catalog.fillable_arguments(tool)
+
+
+def test_a_hidden_argument_is_never_offered_to_the_model():
+    """`device` is a deployment knob the tool's author kept off a clinician's
+    panel; a model has no better basis for setting it than the default does."""
+    tools = catalog.normalise(CATALOG)
+    bone = catalog.find_tool(tools, "Bone_Seg")
+    assert "device" in bone["arguments"]
+    assert "device" not in catalog.fillable_arguments(bone)
+
+
+def test_missing_required_lists_only_what_the_caller_can_supply():
+    tools = catalog.normalise(CATALOG)
+    bone = catalog.find_tool(tools, "Bone_Seg")
+    assert catalog.missing_required(bone, {}) == ["scans", "model"]
+    assert catalog.missing_required(bone, {"scans": "/a", "model": "/b"}) == []
+
+
+def test_missing_required_keeps_signature_order():
+    """Argument order is the signature's, and a client renders forms in it."""
+    tools = catalog.normalise(CATALOG)
+    reg = catalog.find_tool(tools, "Timepoint_Reg")
+    assert catalog.missing_required(reg, {}) == ["baseline", "followup"]
