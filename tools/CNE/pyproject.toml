@@ -58,13 +58,13 @@ packages = ["src/sadt_cne"]
 # CUDA the wheel was compiled against; the runtime pinned above is separate and
 # may be newer.
 [[tool.uv.index]]
-name = "llama-cpp-cu124"
-url = "https://abetlen.github.io/llama-cpp-python/whl/cu124"
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
 sadt-testkit = { path = "../../testkit", editable = true }
-llama-cpp-python = { index = "llama-cpp-cu124" }
+llama-cpp-python = { index = "llama-cpp-cpu" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

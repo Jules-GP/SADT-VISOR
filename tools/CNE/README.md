@@ -160,10 +160,42 @@ a CPU, and the CUDA build would put a second CUDA runtime in an image whose
 other tools already carry one.
 
 `device` still offers `cuda`, and it maps to `n_gpu_layers=-1`. On the CPU build
-that offloads nothing and costs nothing; swapping the index above for
-`.../whl/cu124` is the entire change a GPU deployment needs. Declaring the
-argument at all is also what lets the server see that a CNE run is CPU work, so
-it does not queue behind a segmentation for the card.
+that offloads nothing and costs nothing. Declaring the argument at all is also
+what lets the server see that a CNE run is CPU work, so it does not queue
+behind a segmentation for the card.
+
+### The CUDA build was measured, and rejected on the numbers
+
+Swapping the index for `.../whl/cu124` and pinning `0.3.19` — the newest
+version that index actually serves a CUDA wheel for; `0.3.35` resolves there
+too but silently falls back to a build with no CUDA in it, and
+`llama_supports_gpu_offload()` returns False — gives a working GPU build on an
+RTX 6000 Ada. It is much faster:
+
+| note | CPU | CUDA | |
+|---|---|---|---|
+| short TMJ consult | 30.7 s | 2.5 s | 12.4x |
+| long TMJ consult, comorbidities | 30.3 s | 15.2 s | 2.0x |
+| three-line follow-up | 176.2 s | 2.1 s | 84.5x |
+
+**And it does not produce the same extraction.** At `temperature=0.0` with a
+fixed seed, small differences in the two backends' arithmetic compound over
+hundreds of generated tokens:
+
+| note | fields CPU / CUDA | same field set | differing |
+|---|---|---|---|
+| short TMJ consult | 45 / 45 | yes | **1** |
+| long TMJ consult | 44 / 42 | no | **59** |
+| three-line follow-up | 43 / 24 | no | **37** |
+
+One differing field out of 45 would be arguable. Two of three notes disagreeing
+on which fields exist at all is not: the backend becomes part of the result,
+and a clinical extraction repeated on another machine would not match. The CPU
+build stays the default until either the divergence is understood or a
+deployment decides, knowingly, that speed is worth it. The `0.3.19` pin and
+the `cu124` index are the whole change; note that the CPU index's own `0.3.19`
+is a **musl** wheel that will not load on a glibc host, so the two indexes
+cannot simply be swapped at a fixed version.
 
 ## Data
 

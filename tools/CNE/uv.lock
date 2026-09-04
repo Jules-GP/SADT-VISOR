@@ -44,7 +44,7 @@ wheels = [
 [[package]]
 name = "llama-cpp-python"
 version = "0.3.35"
-source = { registry = "https://abetlen.github.io/llama-cpp-python/whl/cu124" }
+source = { registry = "https://abetlen.github.io/llama-cpp-python/whl/cpu" }
 dependencies = [
     { name = "diskcache" },
     { name = "jinja2" },
@@ -52,8 +52,14 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35-cu124/llama_cpp_python-0.3.35-py3-none-manylinux_2_35_x86_64.whl" },
-    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35-cu124/llama_cpp_python-0.3.35-py3-none-win_amd64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-linux_riscv64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-macosx_11_0_arm64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-musllinux_1_2_aarch64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-musllinux_1_2_x86_64.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-pyemscripten_2026_0_wasm32.whl" },
+    { url = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-win_amd64.whl" },
 ]
 
 [[package]]
@@ -234,7 +240,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "llama-cpp-python", specifier = "==0.3.35", index = "https://abetlen.github.io/llama-cpp-python/whl/cu124" },
+    { name = "llama-cpp-python", specifier = "==0.3.35", index = "https://abetlen.github.io/llama-cpp-python/whl/cpu" },
     { name = "nvidia-cublas-cu12", specifier = "==12.8.4.1" },
     { name = "nvidia-cuda-runtime-cu12", specifier = "==12.8.90" },
     { name = "pymupdf", specifier = "==1.28.2" },
