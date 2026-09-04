@@ -19,6 +19,7 @@ from .extraction import (
     parse_extraction,
     render_extraction,
     resolve_model_file,
+    supports_gpu_offload,
 )
 from .readers import (
     NOTE_EXTENSIONS,
@@ -78,9 +79,12 @@ def run(
             own default (TMJ 6144, Ortho 2048).
         seed: The sampler's seed, so a run above temperature 0 is still
             reproducible.
-        device: "cpu" or "cuda". This tool pins the CPU build of llama.cpp, so
-            "cuda" only offloads where a CUDA build has been installed in its
-            place; it is otherwise a no-op.
+        device: "cpu" or "cuda". "cuda" offloads every layer of the model to
+            the card, which is measured at 8-13x faster per note; it needs the
+            CUDA build of llama.cpp, which this tool pins. Where that build is
+            not the one installed, the request is reported as ignored --
+            `gpu_offload` in the report is what actually happened -- rather than
+            passing silently as it used to.
 
     Returns:
         The output directory, holding per note an `Extraction_<note>.json` and
@@ -138,9 +142,27 @@ def run(
         logger.warning("%s", warnings[-1])
 
     window = context_for(notes_type, context_tokens)
-    engine = load_model(
-        model_file, window, seed, -1 if device.startswith("cuda") else 0
-    )
+    wants_gpu = device.startswith("cuda")
+    # Asked BEFORE the 4.4 GB load, so a deployment that cannot honour "cuda"
+    # says so in the same second rather than after the weights are in memory.
+    offloading = wants_gpu and supports_gpu_offload()
+    if wants_gpu and not offloading:
+        # The defect this closes: `device` has always been declared and always
+        # been passed through as n_gpu_layers=-1, and on the CPU build of
+        # llama.cpp that offloads nothing whatsoever. The run then reported
+        # `device: cuda` over work done entirely on the CPU, and -- because the
+        # server reads `device` to decide who takes the card -- held one of
+        # MAX_CONCURRENT_GPU_JOBS while doing so. Reported, not refused: the
+        # server fills `device` in from its own setting when the caller sends
+        # none, so refusing would break every request to a CPU deployment
+        # configured for a GPU one.
+        warnings.append(
+            "device is 'cuda' but the llama.cpp installed here has no GPU "
+            "support compiled in, so this run was entirely on the CPU. Install "
+            "the CUDA build of llama-cpp-python, or ask for device='cpu'."
+        )
+        logger.warning("%s", warnings[-1])
+    engine = load_model(model_file, window, seed, -1 if wants_gpu else 0)
     logger.info(
         "CNE: %d note(s), type=%s, context=%d, max_tokens=%d, temperature=%.2f",
         len(found), notes_type, window, max_tokens, temperature,
@@ -156,6 +178,10 @@ def run(
         "temperature": temperature,
         "seed": seed,
         "device": device,
+        # What was ASKED FOR is `device`; this is what HAPPENED. They differ
+        # exactly when a CUDA request met a CPU build, and the warning above
+        # says so in words.
+        "gpu_offload": offloading,
         "warnings": warnings,
         "notes": [],
     }

@@ -9,6 +9,7 @@ Every test is named after the behaviour it pins; the ones that pin a defect
 found in `CNE_CLI/CNE_CLI.py` or `CNE/CNE.py` say so in their docstring.
 """
 
+import ctypes
 import json
 import os
 import subprocess
@@ -94,7 +95,8 @@ def llm(monkeypatch):
     for, and `answers`/`finish_reason` let a test choose what comes back.
     """
     recorder = types.SimpleNamespace(
-        loaded=None, calls=[], answers=ANSWER, finish_reason="stop"
+        loaded=None, calls=[], answers=ANSWER, finish_reason="stop",
+        gpu_offload=False,
     )
 
     def load_model(model_file, context_tokens, seed, n_gpu_layers):
@@ -123,6 +125,11 @@ def llm(monkeypatch):
 
     monkeypatch.setattr(sadt_cne, "load_model", load_model)
     monkeypatch.setattr(sadt_cne, "complete", complete)
+    # Stubbed like the rest of the engine: whether the wheel installed in THIS
+    # checkout has CUDA compiled in must not decide what the suite asserts.
+    monkeypatch.setattr(
+        sadt_cne, "supports_gpu_offload", lambda: recorder.gpu_offload
+    )
     return recorder
 
 
@@ -833,9 +840,8 @@ def test_the_seed_reaches_the_engine_and_the_report(tmp_path, model, llm):
 
 
 def test_the_cpu_device_offloads_no_layer(tmp_path, model, llm):
-    """This tool pins the CPU build of llama.cpp; the argument exists so a
-    deployment that swapped it can say so, and so the server can tell that a
-    CPU run must not queue behind a segmentation for the card."""
+    """`device` is also what tells the server a CNE run on the CPU must not
+    queue behind a segmentation for the card."""
     write_txt(tmp_path / "notes" / "a.txt")
 
     sadt_cne.run(tmp_path / "notes", "TMJ", model, tmp_path / "out")
@@ -850,6 +856,207 @@ def test_the_cuda_device_offloads_every_layer(tmp_path, model, llm):
                  device="cuda")
 
     assert llm.loaded["n_gpu_layers"] == -1
+
+
+# --------------------------------------------------------------------------
+# `device` says what was asked for; `gpu_offload` says what happened
+#
+# The argument was declared and passed through as `n_gpu_layers=-1` long before
+# a build that could honour it was installed. On the CPU wheel that offloads
+# nothing at all, in silence -- and the server, which reads `device` to decide
+# who takes the card, held one of MAX_CONCURRENT_GPU_JOBS for a run that could
+# not use it. Both halves are reported now.
+# --------------------------------------------------------------------------
+
+def test_a_cuda_run_on_a_cuda_build_reports_the_offload(tmp_path, model, llm):
+    llm.gpu_offload = True
+    write_txt(tmp_path / "notes" / "a.txt")
+
+    output = sadt_cne.run(tmp_path / "notes", "TMJ", model, tmp_path / "out",
+                          device="cuda")
+
+    report = report_of(output)
+    assert report["device"] == "cuda"
+    assert report["gpu_offload"] is True
+    assert report["warnings"] == []
+
+
+def test_a_cuda_run_on_a_cpu_build_is_reported_as_ignored(tmp_path, model, llm):
+    """The honesty defect: this used to report `device: cuda` over a run done
+    entirely on the CPU, with nothing anywhere saying so."""
+    llm.gpu_offload = False
+    write_txt(tmp_path / "notes" / "a.txt")
+
+    output = sadt_cne.run(tmp_path / "notes", "TMJ", model, tmp_path / "out",
+                          device="cuda")
+
+    report = report_of(output)
+    assert report["device"] == "cuda"
+    assert report["gpu_offload"] is False
+    assert any("no GPU support" in warning for warning in report["warnings"])
+    assert any("llama-cpp-python" in warning for warning in report["warnings"])
+
+
+def test_a_cuda_request_a_cpu_build_cannot_honour_is_not_refused(tmp_path, model, llm):
+    """Reported, never raised. The server fills `device` in from its own
+    setting when the caller sends none, so refusing would fail every request
+    reaching a CPU deployment that is configured as a GPU one."""
+    llm.gpu_offload = False
+    write_txt(tmp_path / "notes" / "a.txt")
+
+    output = sadt_cne.run(tmp_path / "notes", "TMJ", model, tmp_path / "out",
+                          device="cuda")
+
+    assert entry_for(output, "a.txt")["status"] == "ok"
+
+
+def test_a_cpu_run_never_claims_the_gpu_however_capable_the_build(tmp_path, model, llm):
+    llm.gpu_offload = True
+    write_txt(tmp_path / "notes" / "a.txt")
+
+    output = sadt_cne.run(tmp_path / "notes", "TMJ", model, tmp_path / "out",
+                          device="cpu")
+
+    report = report_of(output)
+    assert report["gpu_offload"] is False
+    assert report["warnings"] == []
+
+
+def test_the_build_is_asked_about_the_gpu_before_the_weights_are_loaded(
+        tmp_path, model, llm, monkeypatch):
+    """4.4 GB takes long enough that a deployment which cannot honour `cuda`
+    must say so first, not after the model is in memory."""
+    order = []
+    real_load = sadt_cne.load_model
+
+    monkeypatch.setattr(sadt_cne, "supports_gpu_offload",
+                        lambda: order.append("asked") or False)
+    monkeypatch.setattr(sadt_cne, "load_model",
+                        lambda *a, **k: (order.append("loaded"), real_load(*a, **k))[1])
+    write_txt(tmp_path / "notes" / "a.txt")
+
+    sadt_cne.run(tmp_path / "notes", "TMJ", model, tmp_path / "out",
+                 device="cuda")
+
+    assert order == ["asked", "loaded"]
+
+
+# --------------------------------------------------------------------------
+# The CUDA runtime the wheel links and does not ship
+#
+# `auditwheel` excludes the CUDA runtime from a wheel by policy, so the CUDA
+# build of llama-cpp-python needs `libcudart.so.12` and `libcublas.so.12` from
+# somewhere else. A workstation with a CUDA toolkit has them and hides the
+# problem; the deployment image is `python:3.13-slim` and does not, where
+# `import llama_cpp` dies before a line of this tool runs.
+# --------------------------------------------------------------------------
+
+def _fake_cuda_wheels(tmp_path, monkeypatch, names):
+    """A `nvidia/<package>/lib/<library>` tree, found the way the real one is."""
+    root = tmp_path / "site-packages" / "nvidia"
+    for package, library in names:
+        directory = root / package.split(".")[-1] / "lib"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / library).write_bytes(b"")
+
+    real_find_spec = dependencies.importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name.startswith("nvidia"):
+            location = root / name.split(".")[-1]
+            if not location.is_dir():
+                raise ModuleNotFoundError(name)
+            return types.SimpleNamespace(
+                submodule_search_locations=[str(location)]
+            )
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(dependencies.importlib.util, "find_spec", find_spec)
+    return root
+
+
+def test_the_cuda_runtime_is_opened_from_the_tools_own_virtualenv(
+        tmp_path, monkeypatch):
+    _fake_cuda_wheels(tmp_path, monkeypatch, dependencies.CUDA_RUNTIME_LIBRARIES)
+    opened = []
+    monkeypatch.setattr(ctypes, "CDLL",
+                        lambda path, mode=None: opened.append(path))
+
+    returned = dependencies.preload_cuda_runtime()
+
+    assert [Path(path).name for path in returned] == [
+        library for _, library in dependencies.CUDA_RUNTIME_LIBRARIES
+    ]
+    assert opened == returned
+
+
+def test_the_cuda_runtime_is_opened_globally_so_llama_cpp_resolves_against_it(
+        tmp_path, monkeypatch):
+    """RTLD_GLOBAL is the whole mechanism: `libggml-cuda.so` is dlopen'd later,
+    by llama.cpp, and resolves its undefined symbols against what is already
+    loaded globally. Opened privately it would resolve nothing."""
+    _fake_cuda_wheels(tmp_path, monkeypatch, dependencies.CUDA_RUNTIME_LIBRARIES)
+    modes = []
+    monkeypatch.setattr(ctypes, "CDLL",
+                        lambda path, mode=None: modes.append(mode))
+
+    dependencies.preload_cuda_runtime()
+
+    assert modes == [ctypes.RTLD_GLOBAL] * len(dependencies.CUDA_RUNTIME_LIBRARIES)
+
+
+def test_cublaslt_is_opened_before_cublas_which_is_linked_against_it():
+    names = [library for _, library in dependencies.CUDA_RUNTIME_LIBRARIES]
+    assert names.index("libcublasLt.so.12") < names.index("libcublas.so.12")
+
+
+def test_a_deployment_without_the_cuda_wheels_preloads_nothing_and_raises_nothing(
+        tmp_path, monkeypatch):
+    """The CPU build needs none of this, and a workstation whose loader finds
+    the system copy needs none of it either. Neither may fail here."""
+    _fake_cuda_wheels(tmp_path, monkeypatch, [])
+
+    assert dependencies.preload_cuda_runtime() == []
+
+
+def test_a_cuda_library_that_will_not_open_is_skipped_not_raised(
+        tmp_path, monkeypatch):
+    """llama.cpp is about to try the system copy, and the error it raises then
+    names the library far more usefully than anything raised here could."""
+    _fake_cuda_wheels(tmp_path, monkeypatch, dependencies.CUDA_RUNTIME_LIBRARIES)
+
+    def refuse(path, mode=None):
+        raise OSError(f"{Path(path).name}: file too short")
+
+    monkeypatch.setattr(ctypes, "CDLL", refuse)
+
+    assert dependencies.preload_cuda_runtime() == []
+
+
+def test_the_cuda_runtime_is_preloaded_before_llama_cpp_is_imported(monkeypatch):
+    """Order, not presence: the import is what fails without the preload, so
+    doing it before the first GPU call would already be too late."""
+    order = []
+    monkeypatch.setattr(extraction, "preload_cuda_runtime",
+                        lambda: order.append("preloaded") or [])
+    monkeypatch.setattr(extraction, "require",
+                        lambda module, package: order.append("imported"))
+
+    extraction.engine_module()
+
+    assert order == ["preloaded", "imported"]
+
+
+def test_the_build_reports_whether_it_can_offload(monkeypatch):
+    monkeypatch.setattr(extraction, "engine_module",
+                        lambda: types.SimpleNamespace(
+                            llama_supports_gpu_offload=lambda: 1))
+    assert extraction.supports_gpu_offload() is True
+
+    monkeypatch.setattr(extraction, "engine_module",
+                        lambda: types.SimpleNamespace(
+                            llama_supports_gpu_offload=lambda: 0))
+    assert extraction.supports_gpu_offload() is False
 
 
 def test_the_finish_reason_is_reported_for_every_note(tmp_path, model, llm):
@@ -1197,6 +1404,85 @@ def test_the_tool_is_declared_in_its_pyproject():
 
     assert "[tool.sadt]" in text
     assert 'name = "CNE"' in text
+
+
+# --------------------------------------------------------------------------
+# Needs a CUDA build and a card. Deselected by default; run it by hand on a
+# GPU deployment with `-m gpu -o addopts=`.
+# --------------------------------------------------------------------------
+
+@pytest.mark.gpu
+def test_the_installed_build_has_gpu_support_compiled_in():
+    """Cheap, and it is the whole precondition: without this every `cuda`
+    request is answered on the CPU and reported as ignored."""
+    assert extraction.supports_gpu_offload(), (
+        "the llama-cpp-python installed here is the CPU build. Check the "
+        "`[[tool.uv.index]]` url in pyproject.toml."
+    )
+
+
+def _vram_used_by_this_process():
+    """MiB this process holds on the card, from nvidia-smi. 0 if it holds none."""
+    query = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, check=True,
+    )
+    for line in query.stdout.splitlines():
+        pid, _, used = line.partition(",")
+        if pid.strip() == str(os.getpid()):
+            return int(used.strip())
+    return 0
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+def test_the_weights_really_land_on_the_card(tmp_path):
+    """That the build CAN offload is not that this run DID. Measured against
+    the card rather than inferred from the argument:
+
+        CNE_MODEL=../../DATA/CNE/models/TMJ \
+        .venv/bin/python -m pytest -m "gpu and models" -o addopts=
+    """
+    bundle = os.environ.get("CNE_MODEL")
+    if not bundle:
+        pytest.skip("set CNE_MODEL to a bundle under DATA/CNE/models/")
+
+    before = _vram_used_by_this_process()
+    engine = extraction.load_model(
+        extraction.resolve_model_file(Path(bundle)), 2048, 0, -1
+    )
+    after = _vram_used_by_this_process()
+    del engine
+
+    # A 7B model at q4_k_m is ~4.4 GB of weights. Anything above a gigabyte is
+    # unambiguous; the threshold is not tuned to a particular quantisation.
+    assert after - before > 1024, (
+        f"loading with n_gpu_layers=-1 took {after - before} MiB of VRAM, so "
+        f"the layers stayed on the CPU"
+    )
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+def test_a_real_cuda_run_reports_the_offload_and_warns_about_nothing(tmp_path):
+    bundle = os.environ.get("CNE_MODEL")
+    if not bundle:
+        pytest.skip("set CNE_MODEL to a bundle under DATA/CNE/models/")
+
+    write_txt(
+        tmp_path / "notes" / "note.txt",
+        "Patient reports left TMJ pain, 7/10, worse on chewing. "
+        "Clicking on opening. No locking.",
+    )
+
+    output = sadt_cne.run(tmp_path / "notes", "TMJ", Path(bundle),
+                          tmp_path / "out", device="cuda")
+
+    report = report_of(output)
+    assert report["device"] == "cuda"
+    assert report["gpu_offload"] is True
+    assert report["warnings"] == []
 
 
 # --------------------------------------------------------------------------

@@ -31,7 +31,7 @@ import logging
 import os
 from pathlib import Path
 
-from .dependencies import ToolUnavailableError, require
+from .dependencies import ToolUnavailableError, preload_cuda_runtime, require
 
 logger = logging.getLogger("CNE")
 
@@ -164,9 +164,35 @@ def build_messages(notes_type: str, text: str) -> list:
     return messages
 
 
+def engine_module():
+    """The `llama_cpp` module, with the CUDA runtime opened first.
+
+    Every import of llama.cpp in this tool goes through here, and the order is
+    the whole point: the CUDA build links `libcudart.so.12` without shipping it,
+    so `preload_cuda_runtime()` has to run BEFORE the import rather than before
+    the first GPU call. It is a no-op on the CPU build and on any machine whose
+    loader would have found the library by itself.
+    """
+    preload_cuda_runtime()
+    return require("llama_cpp", "llama-cpp-python")
+
+
+def supports_gpu_offload() -> bool:
+    """Whether the llama.cpp build INSTALLED HERE can put layers on a GPU.
+
+    A property of the wheel, not of the machine and not of the request. It is
+    what makes `device="cuda"` checkable: the argument has always been declared
+    and has always been passed through as `n_gpu_layers=-1`, but on the CPU
+    wheel that offloads nothing at all, silently, and the run then reports
+    `device: cuda` over a run that was entirely on the CPU. Read once and put
+    in the report beside `device`, so the two can be compared.
+    """
+    return bool(engine_module().llama_supports_gpu_offload())
+
+
 def load_model(model_file, context_tokens: int, seed: int, n_gpu_layers: int):
     """The llama.cpp engine, loaded once for the whole batch."""
-    llama_cpp = require("llama_cpp", "llama-cpp-python")
+    llama_cpp = engine_module()
     with quiet_stderr():
         return llama_cpp.Llama(
             model_path=str(model_file),
@@ -312,10 +338,12 @@ __all__ = [
     "build_messages",
     "complete",
     "context_for",
+    "engine_module",
     "load_model",
     "model_type_hint",
     "parse_extraction",
     "quiet_stderr",
     "render_extraction",
     "resolve_model_file",
+    "supports_gpu_offload",
 ]

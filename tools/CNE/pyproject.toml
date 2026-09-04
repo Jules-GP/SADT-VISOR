@@ -5,13 +5,24 @@ description = "Extract structured key-value findings from free-text clinical not
 # The deployment image's interpreter (lab-ai:2026.08, python 3.11.13).
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    # The inference engine. Pinned to the CPU wheel index below, which is what
-    # upstream also installs (CNE/CNE.py:62): these models are 4-8 bit GGUF
-    # quantisations that run on a CPU, and the CUDA build would drag a second
-    # CUDA runtime into an image whose other tools already carry one. The
-    # `device` argument still offers "cuda" -- swapping the index below for
-    # `.../whl/cu124` is the whole change a GPU deployment needs.
+    # The inference engine, from the CUDA 12.4 wheel index below. Upstream
+    # installs the CPU wheel (CNE/CNE.py:62) and is right to: it runs inside
+    # Slicer on a clinician's laptop. This is a server with a 48 GB card, and a
+    # 7B model at q4_k_m is 4.4 GB of weights -- measured at 9.6x faster per
+    # note on this card, and the answers are identical (see README).
     "llama-cpp-python==0.3.35",
+    # What that wheel LINKS and does not SHIP. auditwheel excludes the CUDA
+    # runtime by policy, so `import llama_cpp` dies on `libcudart.so.12:
+    # cannot open shared object file` in the deployment image, which is
+    # `python:3.13-slim` and carries no CUDA at all. Opened by
+    # `dependencies.preload_cuda_runtime()` before the import.
+    #
+    # The versions are AMASSS's and Batch_Dental_Seg's to the digit, not the
+    # 12.4 that matches the wheel's build: CUDA 12 is minor-version compatible
+    # in this direction, and identical files are what the image hardlinks
+    # instead of storing a second 600 MB copy of cuBLAS per tool.
+    "nvidia-cuda-runtime-cu12==12.8.90",
+    "nvidia-cublas-cu12==12.8.4.1",
     # Reading the notes. Neither is heavy and neither is optional in practice,
     # but both are imported only when a note of that format is actually read:
     # a batch of .txt must not fail because a PDF reader is absent.
@@ -40,14 +51,20 @@ packages = ["src/sadt_cne"]
 # SOURCE rather than an extra index -- as an extra index uv is free to mix
 # registries, and the same version number exists on PyPI as an sdist that
 # compiles llama.cpp from source at install time.
+#
+# cu124 rather than the cu128 the torch tools use: cu126 and cu128 are 404 on
+# this index, cu124 and cu125 are the newest that exist, and the driver here
+# (595.84, CUDA 13.2) is far newer than either. The build is what fixes the
+# CUDA the wheel was compiled against; the runtime pinned above is separate and
+# may be newer.
 [[tool.uv.index]]
-name = "llama-cpp-cpu"
-url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+name = "llama-cpp-cu124"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cu124"
 explicit = true
 
 [tool.uv.sources]
 sadt-testkit = { path = "../../testkit", editable = true }
-llama-cpp-python = { index = "llama-cpp-cpu" }
+llama-cpp-python = { index = "llama-cpp-cu124" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

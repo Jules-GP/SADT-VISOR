@@ -10,9 +10,19 @@ both of them defects upstream had:
   called `sys.exit(1)` when `pymupdf` OR `python-docx` was absent
   (`CNE_CLI.py:105-115`), so a folder of forty `.txt` notes could not be
   extracted because a PDF reader nobody was going to use was missing.
+
+It also holds `preload_cuda_runtime`, which is the same idea one layer down: a
+shared library the wheel links but does not ship, opened before the thing that
+needs it, and never fatal when this deployment does not need it at all.
 """
 
+import ctypes
 import importlib
+import importlib.util
+import logging
+import os
+
+logger = logging.getLogger("CNE")
 
 
 class ToolUnavailableError(Exception):
@@ -40,3 +50,65 @@ def require(module_name: str, package_name: str):
             f"This server cannot read that note: the '{package_name}' package is not "
             f"installed (import {module_name} failed: {error})."
         ) from error
+
+
+# The CUDA runtime this deployment's llama.cpp needs, in the order it needs it:
+# cuBLAS is linked against cuBLASLt, so that one is opened first. Each name is
+# the package that ships the library and the file inside its `lib/` directory.
+CUDA_RUNTIME_LIBRARIES = (
+    ("nvidia.cuda_runtime", "libcudart.so.12"),
+    ("nvidia.cublas", "libcublasLt.so.12"),
+    ("nvidia.cublas", "libcublas.so.12"),
+)
+
+
+def preload_cuda_runtime() -> list:
+    """Open the CUDA runtime out of this virtualenv, before llama.cpp needs it.
+
+    The CUDA build of `llama-cpp-python` LINKS `libcudart.so.12` and
+    `libcublas.so.12` and SHIPS NEITHER -- auditwheel excludes the CUDA runtime
+    from a wheel by policy, the way it excludes the driver. On a workstation
+    with a CUDA toolkit installed the dynamic loader finds them anyway, which is
+    exactly why this is easy to miss: the deployment image is `python:3.13-slim`
+    and has no CUDA at all, and there `import llama_cpp` dies on
+
+        OSError: libcudart.so.12: cannot open shared object file
+
+    before a single line of this tool runs. Measured, in that image, with the
+    card attached.
+
+    So they are pinned in `pyproject.toml` as `nvidia-cuda-runtime-cu12` and
+    `nvidia-cublas-cu12` -- the same wheels at the same versions every torch
+    tool in the image already carries, so the image hardlinks them instead of
+    keeping a second copy -- and opened here with `RTLD_GLOBAL`, so that the
+    `dlopen` llama.cpp does moments later resolves against them. It is what
+    `import torch` does, for the same reason.
+
+    **Best effort, deliberately.** A CPU-wheel deployment has neither the
+    packages nor any need of them, and must not fail here; nor must a
+    workstation whose loader would have found the system copy regardless.
+    Returns the paths it opened, which is both what the tests assert on and
+    what says, in one value, which of the two deployments this is.
+    """
+    opened = []
+    for package, library in CUDA_RUNTIME_LIBRARIES:
+        try:
+            spec = importlib.util.find_spec(package)
+        except (ImportError, ValueError):
+            continue
+        locations = list(getattr(spec, "submodule_search_locations", None) or [])
+        for location in locations:
+            candidate = os.path.join(location, "lib", library)
+            if not os.path.exists(candidate):
+                continue
+            try:
+                ctypes.CDLL(candidate, mode=ctypes.RTLD_GLOBAL)
+            except OSError as error:
+                # Not fatal: llama.cpp is about to try the system copy, and the
+                # error it raises then names the library far more usefully than
+                # anything that could be raised here.
+                logger.debug("could not preload %s: %s", candidate, error)
+                continue
+            opened.append(candidate)
+            break
+    return opened
