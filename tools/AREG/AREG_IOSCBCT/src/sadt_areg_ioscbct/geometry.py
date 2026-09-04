@@ -29,11 +29,16 @@ _RMSE_THRESHOLD = 1e-8
 _FITNESS_THRESHOLD = 1e-8
 
 
-def align_by_landmarks(moving_points: np.ndarray, moving_lms, fixed_lms) -> np.ndarray:
+def align_by_landmarks(moving_lms, fixed_lms) -> np.ndarray:
     """The 4x4 that best maps `moving_lms` onto `fixed_lms`, rigid.
 
     `vtkLandmarkTransform` in RigidBody mode, which is a closed-form fit rather
     than a search: same landmarks in, same matrix out, every time.
+
+    It takes the landmarks and nothing else. It used to take the mesh's points
+    as its first argument and never read them, which reads as though the fit
+    were influenced by the surface -- it is not, and that is the property the
+    two-stage design depends on.
     """
     import vtk
 

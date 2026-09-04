@@ -195,3 +195,124 @@ def test_every_mucogingival_tooth_has_an_aim_offset():
         assert len(offset) == 3, tooth
         # Below the crown, always: the gingival margin is under it.
         assert offset[2] < 0, tooth
+
+
+# ---------------------------------------------------------------------------
+# The published schema and the catalog cannot drift apart
+#
+# `Literal` takes literals only, so it cannot be built from the catalog. That
+# makes the signature a SECOND declaration of the same sets, and these are what
+# keep the two honest: an option added to one and not the other is either
+# unselectable from the client, or offered and then refused.
+# ---------------------------------------------------------------------------
+
+def test_every_published_default_is_one_of_its_own_options():
+    """A default outside its option list gives the client a picker that cannot
+    produce the value the tool starts from."""
+    import inspect
+
+    for argument in ("networks", "device"):
+        default = inspect.signature(run).parameters[argument].default
+        options = _choices(argument)
+        for value in (default if isinstance(default, list) else [default]):
+            assert value in options, (argument, value)
+
+
+def test_the_published_devices_are_the_two_the_engine_resolves():
+    """`resolve_device` falls back to CPU when no card is visible, so both
+    values are always runnable -- but a third would reach torch verbatim."""
+    assert _choices("device") == ["cuda", "cpu"]
+
+
+def test_the_prediction_id_default_is_the_one_the_engine_falls_back_to():
+    """Declared twice -- in the signature and in `predict_landmarks` -- so a
+    direct API call and an HTTP one name their files the same way."""
+    import inspect
+
+    assert inspect.signature(run).parameters["prediction_ID"].default == "Pred"
+
+
+def test_the_layout_only_names_arguments_the_signature_offers():
+    """`describe.py` refuses a hint naming an argument `run()` does not take,
+    so a stale entry here is a tool that will not publish its schema at all."""
+    import inspect
+
+    from sadt_ali_ios.layout import LAYOUT
+
+    assert set(LAYOUT) <= set(inspect.signature(run).parameters)
+
+
+def test_the_network_selection_is_returned_in_declaration_order():
+    """Not the caller's order: the report, the passes and the log lines all
+    read from it, and a run that reordered itself per request would make two
+    identical batches unreadable side by side."""
+    assert catalog.network_codes(["Cervical", "Occlusal"]) == ("O", "C")
+    assert catalog.network_codes(["Mucogingival", "Occlusal"]) == ("O", "MG")
+
+
+def test_a_repeated_network_is_asked_for_once():
+    """A client rendering check boxes can send the same family twice; running
+    it twice doubles a pass over every mesh for an identical answer."""
+    assert catalog.network_codes(["Occlusal", "O", "Occlusal"]) == ("O",)
+
+
+def test_an_empty_selection_stays_empty_rather_than_meaning_everything():
+    """`None` means "the argument was omitted" and falls back to every
+    network; `[]` means "the user cleared the box" and has to be refused by
+    name, not silently turned into a full run."""
+    assert catalog.network_codes([]) == ()
+    assert catalog.network_codes(None) == catalog.NETWORK_CODES
+
+
+def test_an_unknown_network_names_the_value_it_was_given():
+    """The message reaches the user as a 422, so it has to say WHICH name was
+    wrong as well as which are right."""
+    with pytest.raises(ValueError) as raised:
+        catalog.network_codes(["Buccal"])
+    message = str(raised.value)
+    assert "'Buccal'" in message
+    for known in catalog.NETWORK_NAMES:
+        assert known in message
+
+
+def test_the_display_names_round_trip_to_the_codes_and_back():
+    """The report publishes display names and the engine keys on codes; a
+    one-way table would report a network under a name no client offers."""
+    for display, code in catalog.NETWORK_NAMES.items():
+        assert catalog.NETWORK_DISPLAY_NAMES[code] == display
+    assert set(catalog.NETWORK_DISPLAY_NAMES) == set(catalog.NETWORK_CODES)
+
+
+def test_every_network_has_a_label_table_of_the_right_width():
+    """The channels of a network's output are read positionally, so a label
+    table one entry short renames every landmark after the gap."""
+    for code, types in catalog.NETWORKS.items():
+        for number, names in catalog.LABELS[code].items():
+            assert len(names) == len(types), (code, number)
+
+
+def test_the_two_jaws_partition_the_universal_numbering():
+    """A tooth in both jaws would be predicted twice, once against the wrong
+    weights."""
+    upper = set(catalog.UNIVERSAL_NUMBERS["Upper"].values())
+    lower = set(catalog.UNIVERSAL_NUMBERS["Lower"].values())
+    assert upper == set(range(2, 16))
+    assert lower == set(range(18, 32))
+    assert not upper & lower
+    assert set(catalog.JAW_OF_NUMBER) == upper | lower
+
+
+def test_the_crown_networks_cover_every_tooth_of_both_jaws():
+    """A tooth missing from a label table is one the engine walks past in
+    silence."""
+    every_number = {str(number) for number in catalog.JAW_OF_NUMBER}
+    assert set(catalog.LABELS["O"]) == every_number
+    assert set(catalog.LABELS["C"]) == every_number
+
+
+def test_the_mucogingival_teeth_are_the_thirteen_that_were_trained():
+    """Tooth 18 was excluded from training, so asking for it is asking a
+    question the network was never shown."""
+    assert catalog.MG_TEETH == tuple(range(19, 32))
+    assert 18 not in catalog.MG_TEETH
+    assert len(catalog.MG_OUTPUT_NAME) == len(catalog.MG_TEETH)
