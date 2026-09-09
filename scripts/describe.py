@@ -93,7 +93,12 @@ DOC_ARGUMENTS = "Args:"
 # restate them; `layout_for` below refuses anything that names an argument or
 # an option the signature does not publish, which is what makes that hold.
 LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label",
-               "hidden")
+               "hidden",
+               # A vec2's two axes, low end first (or high end first to mirror
+               # the axis). Declared here with the other layout keys because a
+               # tool writes them in the same place, but they are NOT
+               # presentation: the server refuses a value outside them.
+               "x_range", "y_range")
 
 LAYOUT_MODULE = "layout"
 
@@ -161,6 +166,26 @@ def type_name(annotation, where):
             "list[str].".format(where)
         )
 
+    # `tuple[float, float]` is a "vec2": two numbers set together because they
+    # are one position rather than two settings. The client renders a 2D pad for
+    # it when the layout also says `ui = "joystick"`, and the server validates
+    # both numbers against the `x_range`/`y_range` the layout declares -- the one
+    # layout key that is not presentation only.
+    #
+    # Only the two-float form. `tuple[float, float, float]` is a point and would
+    # want a different widget; refusing it now is cheaper than publishing a type
+    # nothing renders.
+    if typing.get_origin(annotation) is tuple:
+        args = typing.get_args(annotation)
+        if args == (float, float):
+            return "vec2", None
+        raise SchemaError(
+            "{}: tuple[{}] is not supported. Only tuple[float, float], which is "
+            "the two-axis 'vec2'.".format(
+                where, ", ".join(getattr(a, "__name__", str(a)) for a in args) or "..."
+            )
+        )
+
     if typing.get_origin(annotation) is list:
         args = typing.get_args(annotation)
         if len(args) == 1:
@@ -181,7 +206,8 @@ def type_name(annotation, where):
 
     raise SchemaError(
         "{}: unsupported annotation {!r}. Allowed: Path, str, int, float, bool, "
-        "Literal[...] of str or int, and list[...] of those. Optional/Union are "
+        "Literal[...] of str or int, tuple[float, float], and list[...] of those. "
+        "Optional/Union are "
         "not supported -- an argument is optional because it has a default, not "
         "because it is typed that way.".format(where, annotation)
     )
@@ -217,6 +243,22 @@ def check_default(name, kind, default, choices=None):
             "argument '{}' defaults to None. There is no nullable type here: drop "
             "the default to make the argument required, or give it a real one.".format(name)
         )
+
+    if kind == "vec2":
+        # Two numbers, and JSON has no tuple: a default written `(0.5, 0.0)` in
+        # the signature has to arrive as a list, the same shape the wire uses.
+        if not isinstance(default, (list, tuple)) or len(default) != 2:
+            raise SchemaError(
+                "argument '{}' is vec2 but defaults to {!r}. A vec2 default is "
+                "two numbers.".format(name, default)
+            )
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               for value in default):
+            raise SchemaError(
+                "argument '{}' is vec2 but defaults to {!r}. Both must be "
+                "numbers.".format(name, default)
+            )
+        return [float(value) for value in default]
 
     if kind.startswith("list["):
         element = kind[len("list[") : -1]

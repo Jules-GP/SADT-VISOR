@@ -742,3 +742,64 @@ def test_a_required_tool_named_in_a_loop_is_published(tmp_path):
     """
     schema = json.loads(describe(make_tool(tmp_path, REQUIRES_LOOP)).stdout)
     assert schema["calls"] == ["ALI_IOS", "Crown_Seg"]
+
+
+# ---------------------------------------------------------------------------
+# vec2: two numbers set together
+
+VEC2 = """
+    def run(scan: Path, output_dir: Path,
+            corner: tuple[float, float] = (0.5, 0.0)) -> Path:
+        \"\"\"Place a corner.
+
+        Args:
+            scan: The scan.
+            output_dir: Where results go.
+            corner: Ratio and adjust of one corner.
+        \"\"\"
+        return output_dir
+"""
+
+VEC3 = """
+    def run(scan: Path, output_dir: Path,
+            point: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> Path:
+        \"\"\"Place a point.
+
+        Args:
+            scan: The scan.
+            output_dir: Where results go.
+            point: A point.
+        \"\"\"
+        return output_dir
+"""
+
+
+def test_a_pair_of_floats_is_published_as_a_vec2(tmp_path):
+    """Two numbers that are one position rather than two settings.
+
+    FlexReg's butterfly corners are the case: each has a medio-lateral ratio and
+    an antero-posterior adjust, and the client's pad reads both axes spatially -
+    the knob sits where the point sits on the arch. Two number fields state two
+    numbers and cannot state that.
+    """
+    schema = json.loads(describe(make_tool(tmp_path, VEC2)).stdout)
+
+    assert schema["arguments"]["corner"]["type"] == "vec2"
+    assert schema["arguments"]["corner"]["default"] == [0.5, 0.0]
+
+
+def test_a_vec2_default_must_be_two_numbers(tmp_path):
+    body = VEC2.replace("(0.5, 0.0)", '"middle"')
+    result = describe(make_tool(tmp_path, body))
+
+    assert result.returncode != 0
+    assert "two numbers" in result.stderr
+
+
+def test_a_three_number_tuple_is_refused_rather_than_published(tmp_path):
+    """A point wants a different widget. Refusing it costs less than publishing
+    a type nothing renders."""
+    result = describe(make_tool(tmp_path, VEC3))
+
+    assert result.returncode != 0
+    assert "tuple[float, float]" in result.stderr
