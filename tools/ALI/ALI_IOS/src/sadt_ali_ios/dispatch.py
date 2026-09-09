@@ -614,7 +614,10 @@ def identify(
 
     report["tool"] = "ALI_IOS"
     # So the report says which weights ran even when nobody read the argument.
-    report["model_bundle"] = os.path.basename(str(model_path).rstrip(os.sep))
+    # `setdefault`: the engine names the bundle the checkpoints actually came
+    # from, which is the better answer whenever it has one. This is the
+    # fallback for a run that never reached the engine.
+    report.setdefault("model_bundle", os.path.basename(str(model_path).rstrip(os.sep)))
     report["output_dir"] = output_dir
     report["duration_seconds"] = round(time.monotonic() - started_at, 2)
 

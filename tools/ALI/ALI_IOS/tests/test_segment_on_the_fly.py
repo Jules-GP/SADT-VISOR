@@ -161,6 +161,8 @@ def stub_engine(monkeypatch):
             "mode": "IOS",
             "device": device,
             "prediction_ID": prediction_ID,
+            # As the real engine does: the bundle the checkpoints came from.
+            "model_bundle": "ALI_IOS_Models",
             "networks": ["Occlusal"],
             "landmarks_without_model": [],
             "models_unrecognized": [],
@@ -493,3 +495,18 @@ def test_one_unreadable_mesh_does_not_sink_the_batch(tmp_path, stub_engine):
     assert report["scans"]["corrupt.vtk"]["status"] == "failed"
     # The engine was asked about the readable mesh, and only about it.
     assert [key for _path, key in stub_engine[0]] == ["good.vtk"]
+
+
+def test_the_report_names_the_bundle_the_weights_came_from(tmp_path, stub_engine):
+    """`model` is handed the whole of `DATA/ALI/models/` when the caller names
+    no bundle, so naming the bundle after the ARGUMENT reports "models" -- the
+    one thing this field exists not to say. The engine names it from a
+    checkpoint it actually loaded, and that answer must survive."""
+    output = tmp_path / "out"
+    sup = FakeSup(tmp_path, {"Crown_Seg": crown_seg()})
+
+    run(input=Path(a_mixed_cohort(tmp_path)), model=Path(a_bundle(tmp_path)),
+        output_dir=output, sup=sup)
+
+    report = json.loads((output / dispatch.REPORT_NAME).read_text())
+    assert report["model_bundle"] == "ALI_IOS_Models"
