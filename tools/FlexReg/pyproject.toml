@@ -1,0 +1,54 @@
+[project]
+name = "sadt-flexreg"
+version = "0.1.0"
+description = "Build a registration patch on an intraoral surface, and register two timepoints on it."
+# Bounded by what the pins below publish wheels for. Left open-ended, uv picks
+# the newest interpreter and spends a quarter of an hour building vtk from
+# source, or fails outright.
+requires-python = ">=3.11,<3.13"
+# Pinned to what the port was validated against. A tool's dependencies are a
+# scientific decision here: the patch propagation runs on the GPU through torch,
+# and bumping it means revalidating against reference output rather than reading
+# a green test run.
+dependencies = [
+    "numpy==1.26.4",
+    "vtk==9.3.1",
+    "SimpleITK==2.4.0",
+    "torch==2.8.0",
+]
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_flexreg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+]
+
+[tool.sadt]
+tool = true
+name = "FlexReg"
+
+# The CUDA build, declared as an explicit source rather than an extra index.
+# `explicit` is load-bearing: without it uv looks for every package here, and a
+# `[tool.uv.sources]` entry only applies to a DECLARED dependency -- left
+# transitive it is ignored and torch arrives from PyPI built against a different
+# CUDA, which imports fine and dies on the first kernel.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+# Development only: lets this tool's tests run another tool through that tool's
+# own venv, as a subprocess, the way the server does.
+sadt-testkit = { path = "../../testkit", editable = true }

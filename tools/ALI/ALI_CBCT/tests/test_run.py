@@ -1021,3 +1021,149 @@ def test_an_intraoral_surface_is_refused_by_name(tmp_path):
     message = str(caught.value)
     assert "intraoral surface" in message
     assert "ALI_IOS" in message
+
+
+# ---------------------------------------------------------------------------
+# The seed: the agents' respawn must not come from OS entropy
+# ---------------------------------------------------------------------------
+#
+# The defect these guard: `agent._respawn()` drew from the GLOBAL `np.random`,
+# which nothing in this tool ever seeded. An agent that steps out of the volume
+# restarts at a random position, so a landmark at the edge of the field of view
+# answered differently from one run to the next. Measured on the reference
+# scan: six identical requests, three different outputs -- `C4` at one point
+# (3/6), at a second 52.99 mm away (1/6), or missing (2/6).
+
+
+def test_the_respawn_generator_is_fixed_by_the_seed_and_the_landmark():
+    from sadt_ali_cbct.agent import rng_for
+
+    first = rng_for("C4", 0).integers(0, 10_000, size=20)
+    again = rng_for("C4", 0).integers(0, 10_000, size=20)
+    assert np.array_equal(first, again)
+
+    assert not np.array_equal(first, rng_for("C4", 1).integers(0, 10_000, size=20))
+    assert not np.array_equal(first, rng_for("C3", 0).integers(0, 10_000, size=20))
+
+
+def test_the_respawn_generator_is_the_same_in_a_fresh_interpreter():
+    """`hash()` on a str is salted per process; `zlib.crc32` is not.
+
+    Seeding from the built-in hash would look correct in one process and hand
+    the entropy straight back across two -- which is exactly the failure being
+    fixed, only harder to see.
+    """
+    import subprocess
+    import sys
+
+    script = (
+        "from sadt_ali_cbct.agent import rng_for; "
+        "print(list(rng_for('C4', 0).integers(0, 10_000, size=5)))"
+    )
+    runs = [
+        subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONHASHSEED": salt},
+        ).stdout.strip()
+        for salt in ("0", "1", "12345")
+    ]
+    assert len(set(runs)) == 1, runs
+
+
+def test_an_agent_cannot_be_built_without_saying_where_its_randomness_comes_from():
+    """`rng` is keyword-only and has no default, so the defect cannot come back
+    by someone simply forgetting the argument."""
+    from sadt_ali_cbct.agent import Agent
+
+    with pytest.raises(TypeError):
+        Agent(target="C4", scale_keys=("1", "0-3"), brain=None, environment=None)
+
+
+def test_two_agents_with_the_same_seed_respawn_to_the_same_place():
+    from sadt_ali_cbct.agent import Agent, rng_for
+
+    class FlatEnvironment:
+        """Just enough environment for `_respawn`: the volume's shape."""
+
+        scale_count = 2
+
+        def size(self, _scale_key):
+            return np.array([120, 130, 140])
+
+    def respawns(seed, count=5):
+        agent = Agent(
+            target="C4", scale_keys=("1", "0-3"), brain=None,
+            environment=FlatEnvironment(), rng=rng_for("C4", seed),
+        )
+        positions = []
+        for _ in range(count):
+            agent._respawn()
+            positions.append(tuple(int(value) for value in agent.position))
+        return positions
+
+    assert respawns(0) == respawns(0)
+    assert respawns(0) != respawns(7)
+
+
+def test_respawning_does_not_touch_the_global_numpy_stream():
+    """The other half of the same defect, and the reason a LOCAL generator is
+    used rather than a global seed: a shared stream means two concurrent runs
+    in one process consume each other's randomness."""
+    from sadt_ali_cbct.agent import Agent, rng_for
+
+    class FlatEnvironment:
+        scale_count = 2
+
+        def size(self, _scale_key):
+            return np.array([120, 130, 140])
+
+    agent = Agent(
+        target="C4", scale_keys=("1", "0-3"), brain=None,
+        environment=FlatEnvironment(), rng=rng_for("C4", 0),
+    )
+
+    np.random.seed(1234)
+    expected = np.random.random(4)
+
+    np.random.seed(1234)
+    for _ in range(10):
+        agent._respawn()
+    assert np.array_equal(np.random.random(4), expected)
+
+
+def test_the_run_report_records_the_seed(tmp_path, stub_agent, cbct_environment):
+    """A markups file plus this line is enough to ask for the same answer
+    again, without knowing how the request was made."""
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        regions=CRANIAL_BASE_ONLY,
+        seed=4242,
+    )
+
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
+    assert report["seed"] == 4242
+
+
+def test_a_seed_outside_the_accepted_range_is_an_input_error(
+    tmp_path, stub_agent, cbct_environment
+):
+    """Refused with a message the client shows verbatim, rather than a numpy
+    traceback from four frames down."""
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    for bad in (-1, 2 ** 32):
+        with pytest.raises(ToolInputError, match="seed must be between"):
+            run(
+                input=tmp_path / "cohort",
+                model=bundle,
+                output_dir=tmp_path / "out",
+                regions=CRANIAL_BASE_ONLY,
+                seed=bad,
+            )

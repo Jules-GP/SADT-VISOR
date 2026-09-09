@@ -179,6 +179,7 @@ def identify(
     prediction_ID: str = "Pred",
     device: str = "cuda",
     search_seconds: float = 0.0,
+    seed: int = 0,
 ) -> dict:
     """Place landmarks on whatever this input holds; return the run report.
 
@@ -238,6 +239,7 @@ def identify(
             work_dir=work_dir,
             device=device,
             search_seconds=search_seconds,
+            seed=seed,
         )
         report["dicom_series_converted"] = detected.converted_dicom
     finally:
