@@ -159,7 +159,18 @@ def split_by_labels(meshes: list) -> tuple:
 
     labelled, unlabelled = [], []
     for path, key in meshes:
-        found = surface.label_array_name(surface.read_surface(path)) is not None
+        try:
+            found = surface.label_array_name(surface.read_surface(path)) is not None
+        except Exception:  # noqa: BLE001 - unreadable is not labelled; see below
+            # A mesh this cannot even read is put with the ones needing labels
+            # rather than raised here. One corrupt file in a cohort of forty
+            # then costs that file -- `Crown_Seg` fails it alone and says why,
+            # and the run returns landmarks for the other thirty-nine. Raising
+            # would lose them all, on mesh 3 of 40, before a landmark was
+            # placed.
+            logger.warning("ALI_IOS: a surface could not be read; sending it to '%s'",
+                           CROWN_TOOL)
+            found = False
         (labelled if found else unlabelled).append((path, key))
     return labelled, unlabelled
 

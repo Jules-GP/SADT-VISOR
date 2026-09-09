@@ -210,10 +210,32 @@ def stub_engine(monkeypatch):
 
 
 def _mesh(tmp_path):
-    """An input `detect` accepts. Its contents never reach the stubbed engine."""
+    """A real labelled polydata, small enough to write by hand.
+
+    It used to be a one-line header, on the grounds that its contents never
+    reached the stubbed engine. They do now: `dispatch` reads every mesh's
+    point-data array NAMES to tell the ones that need `Crown_Seg` from the ones
+    that do not, and that read happens before the engine is called at all. A
+    fixture only valid because everything reading it was stubbed is a fixture
+    that stops testing the moment the code stops stubbing.
+    """
     path = tmp_path / "in" / "arch.vtk"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# vtk DataFile Version 3.0\n", encoding="utf-8")
+    path.write_text(
+        "# vtk DataFile Version 3.0\n"
+        "labelled arch\n"
+        "ASCII\n"
+        "DATASET POLYDATA\n"
+        "POINTS 3 float\n"
+        "0 0 0  1 0 0  0 1 0\n"
+        "POLYGONS 1 4\n"
+        "3 0 1 2\n"
+        "POINT_DATA 3\n"
+        "SCALARS PredictedID int 1\n"
+        "LOOKUP_TABLE default\n"
+        "2 2 2\n",
+        encoding="utf-8",
+    )
     return str(path)
 
 

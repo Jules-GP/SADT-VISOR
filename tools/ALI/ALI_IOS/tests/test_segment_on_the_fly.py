@@ -472,3 +472,24 @@ def test_the_tool_it_calls_is_named_by_a_literal_the_generator_can_read():
     # and a `sup.run()` whose first argument is that constant.
     assert re.search(r'^CROWN_TOOL = "%s"$' % dispatch.CROWN_TOOL, source, re.M)
     assert re.search(r"sup\.run\(\s*CROWN_TOOL\b", source)
+
+
+def test_one_unreadable_mesh_does_not_sink_the_batch(tmp_path, stub_engine):
+    """Telling a labelled mesh from a raw one means reading every mesh in the
+    batch, and that read is the first thing a corrupt file breaks -- before a
+    single landmark has been placed. It is put with the ones needing labels, so
+    Crown_Seg fails it alone and says why, and the cohort still returns."""
+    cohort = tmp_path / "cohort"
+    write_surface(cohort / "good.vtk", labelled=True)
+    (cohort / "corrupt.vtk").write_text("# vtk DataFile Version 3.0\n", encoding="utf-8")
+
+    output = tmp_path / "out"
+    sup = FakeSup(tmp_path, {"Crown_Seg": crown_seg(failed=["corrupt.vtk"])})
+
+    run(input=cohort, model=Path(a_bundle(tmp_path)), output_dir=output, sup=sup)
+
+    report = json.loads((output / dispatch.REPORT_NAME).read_text())
+    assert report["scans"]["good.vtk"]["status"] == "ok"
+    assert report["scans"]["corrupt.vtk"]["status"] == "failed"
+    # The engine was asked about the readable mesh, and only about it.
+    assert [key for _path, key in stub_engine[0]] == ["good.vtk"]
