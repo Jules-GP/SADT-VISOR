@@ -1,5 +1,5 @@
-"""Everything ALI_IOS does before inference: discovery and the run report.
-`engine.py` only has to know how to place landmarks.
+"""Everything ALI_IOS does around inference: discovery, the landmark selection
+and the run report. `engine.py` only has to know how to place landmarks.
 
 ALI used to be one tool choosing an engine from the data. Splitting it in two
 moved that question out of the run and into the request: this tool is the
@@ -33,6 +33,7 @@ import os
 import shutil
 import time
 
+from sadt_ali_common import markups
 from sadt_ali_common.discovery import (
     IOS,
     SURFACE_EXTENSIONS,
@@ -326,6 +327,77 @@ def _merge(reports: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Narrowing a run to named landmarks
+# ---------------------------------------------------------------------------
+
+def _keep_only(report: dict, landmarks) -> None:
+    """Drop every landmark the caller did not name from what was written.
+
+    This is deliberately AFTER the run rather than inside the engine. One
+    forward pass covers a (network, jaw, tooth) and emits every channel of that
+    network at once, so predicting UR1O predicts UR1MB and UR1DB with it at no
+    extra cost: naming landmarks narrows what is WRITTEN, never what is
+    computed. What a selection does save is whole passes, and that is decided
+    before the run by `catalog.networks_for` -- by the time the engine is
+    called there is nothing left for it to narrow.
+
+    Each file is rewritten through the writer that produced it, so a filtered
+    file is indistinguishable from one a run of exactly this selection would
+    have written, control-point ids included.
+    """
+    wanted = set(landmarks)
+    for record in report.get("scans", {}).values():
+        kept_files = []
+        for path in record.get("files", []):
+            if _filter_markups(path, wanted):
+                kept_files.append(path)
+            else:
+                # Nothing selected survives on this scan -- an upper-arch
+                # selection against a mandible, say. An empty markups file
+                # opens in Slicer as an empty node, which reads as a run that
+                # went wrong; the scan's own record is where "nothing here"
+                # belongs.
+                os.remove(path)
+        record["files"] = kept_files
+        record["landmarks_found"] = [
+            label for label in record.get("landmarks_found", []) if label in wanted
+        ]
+        degraded = record.get("landmarks_degraded")
+        if degraded:
+            record["landmarks_degraded"] = {
+                label: note for label, note in degraded.items() if label in wanted
+            }
+
+
+def _filter_markups(path: str, wanted: set) -> list:
+    """Rewrite one markups file keeping only `wanted`; return what it kept."""
+    with open(path, encoding="utf-8") as handle:
+        content = json.load(handle)
+
+    points = [
+        point
+        for point in content["markups"][0]["controlPoints"]
+        if point["label"] in wanted
+    ]
+    if not points:
+        return []
+
+    markups.write(
+        {point["label"]: point["position"] for point in points},
+        path,
+        # A caveat belongs to its point and travels with it: dropping the
+        # neighbours it was written beside must not silently make a degraded
+        # landmark look like a clean one.
+        {
+            point["label"]: point["description"]
+            for point in points
+            if point.get("description")
+        },
+    )
+    return [point["label"] for point in points]
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -334,6 +406,7 @@ def identify(
     model_path: str,
     output_dir: str,
     ios_networks=None,
+    landmarks=None,
     prediction_ID: str = "Pred",
     device: str = "cuda",
     sup=None,
@@ -370,12 +443,30 @@ def identify(
         # schema. That must not cost a CUDA stack.
         from . import engine as ios_engine
 
-        networks = ios_catalog.network_codes(ios_networks)
-        if not networks:
+        # An explicit landmark list REPLACES the families rather than narrowing
+        # them, exactly as it does in ALI_CBCT: a caller naming the points it
+        # needs must not also have to leave the right families ticked, and
+        # narrowing would silently drop landmarks for one that set both.
+        selected, unknown = ios_catalog.resolve_landmarks(landmarks)
+        if landmarks and not selected:
             raise ToolInputError(
-                f"Select at least one landmark family under 'ios_networks' "
-                f"({', '.join(ios_catalog.NETWORK_NAMES)})."
+                f"None of the landmarks named under 'landmarks' exists: "
+                f"{', '.join(sorted(set(landmarks)))}. This tool places "
+                f"{len(ios_catalog.LANDMARKS)} landmarks, e.g. "
+                f"{', '.join(ios_catalog.LANDMARKS[:3])}."
             )
+
+        if selected:
+            networks = ios_catalog.networks_for(selected)
+        else:
+            networks = ios_catalog.network_codes(ios_networks)
+            if not networks:
+                # The cross-argument rule the schema cannot express.
+                raise ToolInputError(
+                    f"Select at least one landmark family under 'networks' "
+                    f"({', '.join(ios_catalog.NETWORK_NAMES)}), or name the "
+                    f"points you want under 'landmarks'."
+                )
 
         if sup is None:
             # No way to reach another tool, so nothing changes: the batch is
@@ -479,6 +570,13 @@ def identify(
             )
 
         report = _merge(reports)
+        if selected:
+            _keep_only(report, selected)
+        # What drove the run, and only that: the families are left at their
+        # default when landmarks were named, so reporting them would show a
+        # selection the caller never made. `networks` above stays as the engine
+        # wrote it -- it says which passes actually ran, which is a fact about
+        # the run rather than a selection.
         for key, reason in sorted(segmentation_failures.items()):
             report["scans"][key] = _unprocessed(key, reason)
         processed = sum(1 for record in report["scans"].values() if record["status"] == "ok")
@@ -491,6 +589,12 @@ def identify(
         # reads one field rather than testing whether it exists: empty is the
         # normal case and means every mesh already carried its labels.
         report["segmented_on_the_fly"] = sorted(key for _path, key in segmented)
+        report["landmarks_selected"] = list(selected)
+        if unknown:
+            # Named rather than dropped in silence: a stale client asking for a
+            # landmark this tool no longer places gets a shorter answer than it
+            # asked for, and nothing else would say so.
+            report["landmarks_unknown"] = list(unknown)
     finally:
         # The intermediates are large -- converted DICOM, and every scan
         # preprocessed at two spacings. Removed whether or not the run
