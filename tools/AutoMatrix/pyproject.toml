@@ -1,0 +1,39 @@
+[project]
+name = "sadt-automatrix"
+version = "0.1.0"
+description = "Apply a transform to scans, segmentations and landmark files."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # The whole tool is a resampler: SimpleITK reads the transform, resamples
+    # the image, and writes it back. No network, no GPU, nothing heavier.
+    "SimpleITK==2.5.6",
+    "numpy==2.3.2",
+    # How a patient is read from a file name, shared rather than copied.
+    # CONTRIBUTING.md lists identity derivation as one of the three things that
+    # belong in a shared package: two tools exchanging files by name have to
+    # agree on where the identifier ends, and this tool consumes what AREG,
+    # ASO and AMASSS write.
+    "sadt-areg-common",
+]
+
+[tool.sadt]
+tool = true
+name = "AutoMatrix"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_automatrix"]
+
+[tool.uv.sources]
+sadt-areg-common = { path = "../AREG/common" }
+sadt-testkit = { path = "../../testkit", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`)."]
