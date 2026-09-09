@@ -125,6 +125,51 @@ JAW_OF_NUMBER = {
 JAWS = ("Upper", "Lower")
 
 
+# ---------------------------------------------------------------------------
+# The landmarks, one by one
+# ---------------------------------------------------------------------------
+
+
+def _landmarks_of(network: str, jaw: str) -> tuple:
+    """Every landmark `network` predicts on `jaw`, in the label tables' order."""
+    return tuple(
+        label
+        for number, names in LABELS[network].items()
+        if JAW_OF_NUMBER[int(number)] == jaw
+        for label in names
+    )
+
+
+# Tab -> the landmarks it holds. Derived from the label tables above, never
+# restated: a landmark added to one appears in its tab with no edit here and no
+# client release.
+#
+# Family x jaw rather than family alone because a family is 84 check boxes
+# while an intraoral scan is one arch -- the 42 maxillary options are noise
+# beside a mandible. A group with no landmarks is dropped rather than shown
+# empty, which is what keeps Mucogingival, trained on the mandible alone, from
+# offering an upper tab nothing could ever fill.
+LANDMARK_GROUPS = {
+    f"{display} {jaw}": _landmarks_of(code, jaw)
+    for display, code in NETWORK_NAMES.items()
+    for jaw in JAWS
+    if _landmarks_of(code, jaw)
+}
+
+# Every landmark this tool can place, in the order the tabs present them.
+LANDMARKS = tuple(label for labels in LANDMARK_GROUPS.values() for label in labels)
+
+# Landmark -> the network that predicts it. The three tables share no name -- a
+# test pins that -- so one label names exactly one forward pass; a collision
+# would make a selection ambiguous rather than merely wrong.
+LANDMARK_NETWORK = {
+    label: network
+    for network, table in LABELS.items()
+    for names in table.values()
+    for label in names
+}
+
+
 def network_codes(selection) -> tuple:
     """Turn what `run()` received for `ios_networks` into network codes.
 
@@ -146,3 +191,36 @@ def network_codes(selection) -> tuple:
                 f"Unknown IOS landmark family {name!r}. Known: {', '.join(NETWORK_NAMES)}."
             )
     return tuple(code for code in NETWORK_CODES if code in set(codes))
+
+
+def resolve_landmarks(selection) -> tuple:
+    """`(recognised, unknown)` for what `run()` received for `landmarks`.
+
+    Empty is the ordinary case and means "not specified": the networks decide,
+    which is what every request written before this argument existed relies on.
+
+    Unlike ALI_CBCT's counterpart, a name this catalog does not know CANNOT be
+    honoured here: a network emits a fixed set of channels and there is no
+    bundle-provided extra to fall back on. Unknown names are returned rather
+    than dropped, so the run report can say what the selection did not buy.
+
+    Recognised names come back in declaration order, not the caller's, so the
+    report reads the same way however the request was assembled.
+    """
+    if not selection:
+        return (), ()
+    wanted = set(selection)
+    recognised = tuple(label for label in LANDMARKS if label in wanted)
+    return recognised, tuple(sorted(wanted - set(recognised)))
+
+
+def networks_for(labels) -> tuple:
+    """The networks that must run to produce these landmarks.
+
+    This is what makes naming landmarks cheaper than naming the family they
+    belong to: asking for the 13 mucogingival points runs the MG pass alone,
+    and never the occlusal and cervical passes the default would have run over
+    every mesh.
+    """
+    wanted = {LANDMARK_NETWORK[label] for label in labels if label in LANDMARK_NETWORK}
+    return tuple(code for code in NETWORK_CODES if code in wanted)
