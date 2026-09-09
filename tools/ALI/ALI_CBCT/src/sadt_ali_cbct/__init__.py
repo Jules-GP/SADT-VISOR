@@ -65,11 +65,11 @@ def run(
         regions: Anatomical regions to predict. Every region is on by default:
             a landmark whose weights the bundle lacks costs a line in the run
             report, whereas a region left off by default is one nobody finds.
-        landmarks: Predict exactly these landmarks. Leaving it empty is the
-            ordinary case and hands the choice to `regions`; naming any
-            landmark here REPLACES the region selection rather than narrowing
-            it, which is what lets a caller ask for the seven points it needs
-            instead of running 58 agents to use them.
+        landmarks: Predict exactly these landmarks -- naming any of them
+            REPLACES the region selection rather than narrowing it, which is
+            what lets a caller ask for the seven points it needs instead of
+            running 58 agents to use them. Left empty, `regions` decides, which
+            is what a client showing no region control relies on.
         prediction_ID: Suffix used in output names, e.g. `scan_lm_Pred.mrk.json`.
         device: "cuda" or "cpu". CUDA falls back to CPU when no card is
             visible, with a warning.
