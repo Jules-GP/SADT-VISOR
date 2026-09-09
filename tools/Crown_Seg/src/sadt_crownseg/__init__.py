@@ -27,7 +27,12 @@ def run(
             batch. Folders are searched recursively and the output mirrors the
             input tree, so two patients whose meshes share a file name stay
             apart.
-        model: The crown-segmentation checkpoint (a .pth file).
+        model: The crown-segmentation checkpoint (a .pth file), or a folder
+            holding it -- the published one is named for the training run that
+            produced it, `<date>_val-loss<number>.pth`, and is found inside a
+            folder however deeply it is filed. That is what lets a caller hand
+            over a whole models directory without knowing where the file sits;
+            a folder holding two of them is refused, naming both.
         output_dir: Where the labelled meshes are written, plus
             `run_report.json`. Nothing is written outside it.
         array_name: Name of the point-data array the labels are written to.

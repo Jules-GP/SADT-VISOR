@@ -60,6 +60,14 @@ DEFAULT_SUFFIX = "Seg"
 
 WORK_DIRNAME = ".crownseg_work"
 
+# The published crown-segmentation checkpoint, and the token every one of them
+# is named with. Fly-by-CNN publishes its weights under the training run that
+# produced them -- `<date>_val-loss<number>.pth` -- and that name is what
+# `scripts/data-manifest.yml` stages, byte for byte, under every tool that
+# needs it.
+PUBLISHED_CHECKPOINT = "07-21-22_val-loss0.169.pth"
+CROWN_CHECKPOINT_MARKER = "val-loss"
+
 _INSTALL_HINT = (
     "CrownSeg's engine is an optional extra. Install it with "
     "`uv sync --extra segmentation` in tools/Crown_Seg. A deployment image "
@@ -143,6 +151,87 @@ def resolve_device(requested: str = None) -> str:
     if wanted.startswith("cuda"):
         logger.warning("device=%s requested but CUDA is unavailable; falling back to CPU", wanted)
     return "cpu"
+
+
+# ---------------------------------------------------------------------------
+# Model bundle
+# ---------------------------------------------------------------------------
+
+def _is_crown_checkpoint(name: str) -> bool:
+    """Whether this file name is a crown-segmentation checkpoint.
+
+    **The name is the only thing that can answer this, and that is measured
+    rather than assumed.** The obvious alternative -- open the checkpoint and
+    look at what it holds -- does not separate it from its neighbours: this
+    network and ALI_IOS's landmark networks are both monai UNets, and their
+    state dicts start with the very same key
+    (`model.0.conv.unit0.conv.weight`), so telling them apart would mean
+    comparing tensor shapes. In the folder this is actually pointed at,
+    `DATA/ALI/models/`, that is 244 files and 12 GB to read to find 6.6 MB.
+
+    So it matches the token every published crown checkpoint carries. `_` and
+    `-` are folded together because the two spellings are both in the wild, and
+    neither ALI bundle can collide with it: theirs are `Upper_O_model.pth`,
+    `Lower_MG_v6.pth` and `<landmark>_Net_<scale>.pth`.
+
+    A checkpoint named by some other rule is not recognised, and that is the
+    known cost: `find_checkpoint` then says what it looked for, and pointing
+    `model` straight at the `.pth` still works.
+    """
+    if not name.lower().endswith(".pth"):
+        return False
+    return CROWN_CHECKPOINT_MARKER in name.lower().replace("_", "-")
+
+
+def find_checkpoint(model_path: str) -> str:
+    """The checkpoint `model` names -- given the file itself, or a folder of them.
+
+    `model` used to be a single `.pth` and nothing else. It still is when a
+    caller passes one, which is what keeps a direct call and every existing
+    request working unchanged. What is new is the DIRECTORY: the server hands a
+    hosted-model argument the whole of `DATA/<tool>/models/` when the caller
+    named no bundle, and a tool reaching this one through the supervisor passes
+    on the directory IT was handed -- ALI_IOS segmenting an unlabelled mesh
+    mid-run is exactly that. Neither knows where the file sits inside, so this
+    finds it.
+
+    Walked recursively, so a checkpoint filed under a bundle folder of its own
+    is found as readily as one sitting at the top.
+    """
+    model_path = os.fspath(model_path)
+    if os.path.isfile(model_path):
+        return model_path
+    if not os.path.isdir(model_path):
+        raise ToolInputError(f"Crown-segmentation checkpoint not found: {model_path}")
+
+    # Relative to the folder, never absolute: these messages reach the client
+    # verbatim and the server's own paths are not its business.
+    candidates = sorted(
+        os.path.relpath(os.path.join(root, name), model_path)
+        for root, _dirs, files in os.walk(model_path)
+        for name in files
+        if _is_crown_checkpoint(name)
+    )
+    bundle = os.path.basename(model_path.rstrip(os.sep))
+
+    if len(candidates) == 1:
+        return os.path.join(model_path, candidates[0])
+    if candidates:
+        # Two vintages under one folder. Picking here -- the first, the newest,
+        # the largest -- would leave which weights ran unrecorded, and which
+        # model vintage ran must never be a surprise.
+        raise ToolInputError(
+            "'{}' holds {} crown-segmentation checkpoints ({}). Point 'model' at "
+            "the one to use -- choosing here would leave which weights ran "
+            "unrecorded.".format(bundle, len(candidates), ", ".join(candidates))
+        )
+    raise ToolInputError(
+        "'{}' holds no crown-segmentation checkpoint: a .pth whose name carries "
+        "the '{}' token every published one is named with, e.g. '{}'. Fetch it "
+        "with `setup-models.sh` -- the manifest stages it under every tool that "
+        "needs it -- or point 'model' straight at the .pth file.".format(
+            bundle, CROWN_CHECKPOINT_MARKER, PUBLISHED_CHECKPOINT)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +381,10 @@ def segment_crowns(
     work_dir = os.path.join(output_dir, WORK_DIRNAME)
     os.makedirs(work_dir, exist_ok=True)
 
-    if not os.path.isfile(os.fspath(model_path)):
-        raise ToolInputError(f"Crown-segmentation checkpoint not found: {model_path}")
+    # `model` may be the checkpoint itself or a folder to find it in; see
+    # find_checkpoint. Resolved BEFORE a mesh is read, as it always was: a
+    # request naming weights that are not there has to come back in a second.
+    checkpoint = find_checkpoint(model_path)
 
     meshes = discover_meshes(os.fspath(input_path))
     input_root = _input_root(os.fspath(input_path), meshes)
@@ -371,7 +462,7 @@ def segment_crowns(
             _run_shapeaxi(
                 csv_path=csv_path,
                 output_dir=output_dir,
-                model_path=os.fspath(model_path),
+                model_path=checkpoint,
                 input_root=input_root,
                 array_name=array_name,
                 suffix=suffix,
@@ -404,6 +495,10 @@ def segment_crowns(
 
     report = {
         "tool": TOOL_NAME,
+        # WHICH weights ran, by name. `model` may now be a folder holding
+        # several, so the report has to say which one was picked out of it --
+        # the argument no longer answers that on its own.
+        "checkpoint": os.path.basename(checkpoint),
         "array_name": array_name,
         "suffix": suffix,
         "numbering": "FDI" if fdi else "Universal",

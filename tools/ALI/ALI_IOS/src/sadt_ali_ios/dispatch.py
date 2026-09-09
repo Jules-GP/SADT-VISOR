@@ -9,6 +9,22 @@ than half-processed.
 No DICOM here, unlike ALI_CBCT: a DICOM series is a volume by definition, so
 detecting one is that tool's business. It also needs itk, which this
 environment does not carry.
+
+**A mesh with no tooth labels is segmented mid-run rather than refusing the
+batch.** The landmark networks are pointed at teeth, so a mesh that carries no
+label array is nothing they can be asked about -- and a clinician sending a
+folder of intraoral scans has no reason to know that `Crown_Seg` exists, let
+alone which half of their cohort has already been through it. So the meshes
+that already work are processed FIRST and their landmarks are on disk before a
+second of segmentation is spent; the rest go through `Crown_Seg` and follow.
+That ordering is the whole design: a run cancelled, timed out or killed half
+way still leaves the cheap results behind.
+
+It is the exception CONTRIBUTING.md allows, for the reason it allows it: the
+server cannot chain the two beforehand without segmenting the meshes that did
+not need it and without losing that ordering. With NO supervisor -- a direct
+call, a checkout, an older server -- nothing changes: the batch is refused
+exactly as it was, by the check that names the tool to run.
 """
 
 import json
@@ -26,13 +42,25 @@ from sadt_ali_common.discovery import (
     keyed,
 )
 
-from .errors import ToolInputError
+from .errors import ToolInputError, ToolUnavailableError
 from . import catalog as ios_catalog
 
 logger = logging.getLogger(__name__)
 
 
 REPORT_NAME = "run_report.json"
+
+# The tool asked for tooth labels when a mesh arrives without them. A string,
+# not a dynamic attribute on the supervisor: a typo in a string is greppable and
+# `describe.py` reads it out of this file to publish the schema's `calls`, where
+# `sup.Crown_Seg(...)` is an AttributeError forty minutes into a batch.
+CROWN_TOOL = "Crown_Seg"
+
+# Under the run's own work dir: what was handed to Crown_Seg, what it handed
+# back, and the meshes renamed for the engine to read. All three go with the
+# work dir when the run ends.
+TO_SEGMENT_DIRNAME = "to_segment"
+SEGMENTED_DIRNAME = "segmented"
 
 
 class Input:
@@ -114,6 +142,190 @@ def detect(input_path: str, work_dir: str) -> Input:
 
 
 # ---------------------------------------------------------------------------
+# Tooth labels, on the meshes that arrived without them
+# ---------------------------------------------------------------------------
+
+def split_by_labels(meshes: list) -> tuple:
+    """`(labelled, unlabelled)`, both `(path, key)` lists, order preserved.
+
+    `engine.require_labels` asks the same question of the whole batch and
+    refuses it; this asks it of each mesh, which is what lets the two halves be
+    treated differently. Reading a mesh's point-data array NAMES is what it
+    costs -- never their values, so nothing about the patient is read to decide
+    this.
+    """
+    from . import surface
+
+    labelled, unlabelled = [], []
+    for path, key in meshes:
+        found = surface.label_array_name(surface.read_surface(path)) is not None
+        (labelled if found else unlabelled).append((path, key))
+    return labelled, unlabelled
+
+
+def _stage(source: str, destination: str) -> None:
+    """Put `source` where Crown_Seg will find it, without copying it if we can.
+
+    An intraoral scan is tens of megabytes and a cohort is forty of them, so the
+    meshes are linked rather than copied. Copying is the fallback for a
+    filesystem with no symlinks, not the plan. Absolute target: the callee runs
+    with its own working directory.
+    """
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    try:
+        os.symlink(os.path.abspath(source), destination)
+    except OSError:  # no symlink support, or one already there
+        shutil.copy2(source, destination)
+
+
+def _segment(sup, meshes: list, model_path: str, device: str, work_dir: str) -> tuple:
+    """Ask `Crown_Seg` for tooth labels; return `(labelled, {key: reason})`.
+
+    `meshes` and the first return value are both `(path, key)` pairs, and the
+    KEY is what survives the round trip: a mesh comes back as a different file
+    in a different tree, and the report, the output tree and the markups file
+    still have to name the patient's own scan.
+
+    The meshes are staged UNDER THEIR KEYS so Crown_Seg's own report -- which is
+    keyed by the path relative to what it was given -- comes back keyed the same
+    way. Reading that report is what makes the seam narrow: this knows the
+    callee's published schema and the report it documents, and nothing else
+    about it.
+
+    `model` is the directory this tool was handed, passed straight on. The
+    server fills a hosted-model argument with the whole of `DATA/<tool>/models/`
+    and each engine recognises its own weights inside; that is exactly what
+    Crown_Seg's `find_checkpoint` now does, so the same directory answers for
+    both. A caller who PINNED a bundle instead gets that bundle passed on, and
+    if the crown checkpoint is not in it Crown_Seg says so -- reaching outside
+    the directory the server named would be this tool resolving paths, which is
+    the one thing it must not do.
+
+    Everything is written under this run's own work dir rather than under
+    `sup.tmp`: it is removed on every path out of `identify`, crash included,
+    and it puts the labelled mesh on the same filesystem as the name it is
+    renamed onto below -- which is what makes that a rename and not a copy.
+    """
+    staged_root = os.path.join(work_dir, TO_SEGMENT_DIRNAME)
+    for path, key in meshes:
+        _stage(path, os.path.join(staged_root, key))
+
+    produced = sup.run(
+        CROWN_TOOL,
+        meshes=staged_root,
+        model=model_path,
+        output_dir=os.path.join(work_dir, CROWN_TOOL),
+        # This deployment's device, not Crown_Seg's own default: a CPU-only
+        # server would otherwise have every supervised call ask for CUDA and
+        # fall back with a warning.
+        device=device,
+    )
+    # A tool returns a Path, or a dict of named ones.
+    if isinstance(produced, dict):
+        produced = next(iter(produced.values()))
+
+    records = _crown_records(str(produced))
+    labelled, failed = [], {}
+    for _path, key in meshes:
+        record = records.get(key) or {}
+        output = record.get("output")
+        if not output or not os.path.isfile(output):
+            # One mesh the segmentation could not label costs that mesh, never
+            # the batch: the rest of the cohort is still worth an hour of GPU.
+            failed[key] = record.get("error") or (
+                f"'{CROWN_TOOL}' produced no labelled mesh for it"
+            )
+            continue
+        labelled.append((_rename_to_input(output, key, work_dir), key))
+
+    # Trust, then verify. A mesh reported as segmented that carries no label
+    # array is a contradiction, and the engine's own check would answer it by
+    # refusing the WHOLE batch with a message telling the caller to run
+    # Crown_Seg -- which is exactly what just happened. Demoted to that one
+    # mesh's own failure instead, so the rest of the cohort still runs.
+    labelled, without_labels = split_by_labels(labelled)
+    for _path, key in without_labels:
+        failed[key] = f"'{CROWN_TOOL}' returned a mesh carrying no tooth-label array"
+    return labelled, failed
+
+
+def _crown_records(output_dir: str) -> dict:
+    """Crown_Seg's per-mesh report, keyed as this tool keys its scans.
+
+    Missing or unreadable is not fatal here -- every mesh then reports "no
+    labelled mesh", which is true and is what the caller needs to know. A
+    KeyError in the middle of reading a sibling's report would say nothing at
+    all about the meshes that did work.
+    """
+    try:
+        with open(os.path.join(output_dir, REPORT_NAME), encoding="utf-8") as handle:
+            return json.load(handle).get("meshes") or {}
+    except (OSError, ValueError):
+        logger.warning("'%s' wrote no readable run report", CROWN_TOOL)
+        return {}
+
+
+def _rename_to_input(produced: str, key: str, work_dir: str) -> str:
+    """Move a labelled mesh back onto the name its input had.
+
+    Crown_Seg names its output `<stem>_Seg.vtk`, and the engine names the
+    markups file after the mesh it read -- so without this, a mesh segmented on
+    the fly produces `arch_Seg_lm_Pred.mrk.json` where the same mesh sent
+    already labelled produces `arch_lm_Pred.mrk.json`. ASO and AREG pair
+    landmarks to scans BY THAT STEM, so the two paths have to be
+    indistinguishable in the output; how a mesh got its labels is the report's
+    to say, not the file name's.
+
+    `.vtk` whatever the input was: that is what Crown_Seg writes, and it is what
+    the engine reads back.
+    """
+    destination = os.path.join(
+        work_dir, SEGMENTED_DIRNAME, os.path.dirname(key),
+        os.path.splitext(os.path.basename(key))[0] + ".vtk",
+    )
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    # Both sides live under the work dir, so this is a rename and not a copy.
+    os.replace(produced, destination)
+    return destination
+
+
+def _unprocessed(key: str, reason: str) -> dict:
+    """A scan record for a mesh that never reached the engine.
+
+    Same shape as the engine's own records, so a client reading the report has
+    one thing to read rather than two.
+    """
+    return {
+        "input": os.path.basename(key),
+        "status": "failed",
+        "error": reason,
+        "landmarks_found": [],
+        "landmarks_failed": {},
+        "jaws_without_model": {},
+        "files": [],
+        "duration_seconds": 0.0,
+    }
+
+
+def _merge(reports: list) -> dict:
+    """The two passes' reports as one.
+
+    Only `scans` is genuinely merged. Everything else -- the mode, the device,
+    the networks the bundle could serve, the checkpoints it could not read --
+    is a property of the BUNDLE and the request, identical in both passes, so
+    it is taken from the first rather than combined into a list that would
+    always hold the same value twice. `summary` and `duration_seconds` are
+    recomputed by the caller over the whole run.
+    """
+    merged = dict(reports[0])
+    scans = {}
+    for report in reports:
+        scans.update(report["scans"])
+    merged["scans"] = scans
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -124,12 +336,17 @@ def identify(
     ios_networks=None,
     prediction_ID: str = "Pred",
     device: str = "cuda",
+    sup=None,
 ) -> dict:
     """Place landmarks on whatever this input holds; return the run report.
 
     Everything is written under `output_dir`: one markups file per scan, in the
     input's own tree, plus `run_report.json`. Intermediates go in
     `<output_dir>/.ali_work/` and are removed before returning.
+
+    In two passes when the batch is mixed: the meshes that already carry tooth
+    labels, then the ones `Crown_Seg` labelled for them. See the module
+    docstring for why that order and not the other.
     """
     started_at = time.monotonic()
 
@@ -160,14 +377,120 @@ def identify(
                 f"({', '.join(ios_catalog.NETWORK_NAMES)})."
             )
 
-        report = ios_engine.predict_landmarks(
-            meshes=detected.scans,
+        if sup is None:
+            # No way to reach another tool, so nothing changes: the batch is
+            # refused exactly as it always was, by the check that names the tool
+            # to run. Asked of the WHOLE batch before it is split, so the
+            # message counts the whole batch and every mesh is read once.
+            ios_engine.require_labels(detected.scans)
+            labelled, unlabelled = detected.scans, []
+        else:
+            labelled, unlabelled = split_by_labels(detected.scans)
+            if unlabelled:
+                logger.info(
+                    "ALI_IOS: %d of %d surface(s) carry no tooth labels; the labelled "
+                    "ones run first, the rest go through '%s'",
+                    len(unlabelled), len(detected.scans), CROWN_TOOL,
+                )
+
+        pass_arguments = dict(
             model_path=model_path,
             networks=networks,
             prediction_ID=prediction_ID,
             output_dir=output_dir,
             device=device,
         )
+        reports, errors = [], []
+
+        def run_pass(meshes: list) -> None:
+            """One engine pass, allowed to fail without sinking the other.
+
+            `predict_landmarks` raises when NO mesh of the batch it was given
+            produced a landmark. With two passes that must not end the run: a
+            cohort whose pre-labelled half is unusable still has landmarks to
+            return for the half segmented here, and the other way round. It is
+            recorded and re-raised below only if nothing at all was produced.
+
+            The two typed errors are not per-batch and are re-raised at once: a
+            missing pytorch3d is a property of the venv, and a bundle with no
+            weights for the selected networks a property of the request. Both
+            give the identical answer for the other pass, so running it would
+            cost a second failure and tell nobody anything.
+            """
+            try:
+                reports.append(ios_engine.predict_landmarks(meshes=meshes, **pass_arguments))
+            except (ToolUnavailableError, ToolInputError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - recorded, re-raised below
+                logger.exception("ALI_IOS: no landmark on any of %d mesh(es)", len(meshes))
+                errors.append(exc)
+
+        # The labelled meshes FIRST. They need nothing this run does not already
+        # have, so their landmarks are on disk before a second of segmentation is
+        # spent -- which is what a cancelled or timed-out run keeps.
+        if labelled:
+            run_pass(labelled)
+
+        segmented, segmentation_failures = [], {}
+        if unlabelled:
+            # Before spending a segmentation on meshes nothing could then read.
+            # `predict_landmarks` does this itself, but a batch where NOTHING
+            # arrived labelled has not reached it yet -- so a venv without
+            # pytorch3d would segment the whole cohort and only then say the
+            # landmark engine was never installed. Idempotent: the pass below
+            # calls it again.
+            ios_engine.check_dependencies()
+            if hasattr(sup, "progress"):
+                # The share of the batch already behind us. The engine's own
+                # per-mesh events restart at zero for the second pass, which it
+                # cannot know it is (see `progress.report`'s start/end bounds,
+                # which only the caller of the loop could pass).
+                sup.progress(
+                    len(labelled) / float(len(detected.scans)),
+                    f"labelling {len(unlabelled)} mesh(es) with {CROWN_TOOL}",
+                )
+            try:
+                segmented, segmentation_failures = _segment(
+                    sup, unlabelled, model_path, device, work_dir
+                )
+            except Exception as exc:  # noqa: BLE001 - see below
+                # The whole call failed -- no checkpoint in the bundle, the
+                # engine's extra not installed there, the process killed. That
+                # is not a reason to throw away the landmarks the first pass
+                # already wrote, so it is reported against every mesh it was
+                # asked about and the run ends with what it has.
+                logger.exception("'%s' could not label %d mesh(es)", CROWN_TOOL, len(unlabelled))
+                reason = f"{type(exc).__name__}: {exc}"
+                segmentation_failures = {key: reason for _path, key in unlabelled}
+            if segmented:
+                run_pass(segmented)
+
+        if not reports:
+            if errors:
+                raise errors[0]
+            # Nothing carried labels and nothing could be given any, so the
+            # segmentation is the whole story and its reason is what travels.
+            raise RuntimeError(
+                "ALI_IOS produced no landmarks: none of the {} mesh(es) carried tooth "
+                "labels and '{}' could not label them. First reason: {}".format(
+                    len(detected.scans), CROWN_TOOL,
+                    next(iter(segmentation_failures.values()), "unknown"),
+                )
+            )
+
+        report = _merge(reports)
+        for key, reason in sorted(segmentation_failures.items()):
+            report["scans"][key] = _unprocessed(key, reason)
+        processed = sum(1 for record in report["scans"].values() if record["status"] == "ok")
+        report["summary"] = {
+            "total": len(report["scans"]),
+            "processed": processed,
+            "failed": len(report["scans"]) - processed,
+        }
+        # Which meshes did not arrive ready, by key. Always present, so a client
+        # reads one field rather than testing whether it exists: empty is the
+        # normal case and means every mesh already carried its labels.
+        report["segmented_on_the_fly"] = sorted(key for _path, key in segmented)
     finally:
         # The intermediates are large -- converted DICOM, and every scan
         # preprocessed at two spacings. Removed whether or not the run

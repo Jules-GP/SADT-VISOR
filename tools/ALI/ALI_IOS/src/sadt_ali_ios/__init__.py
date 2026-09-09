@@ -31,6 +31,8 @@ def run(
     ] = ["Occlusal", "Cervical"],
     prediction_ID: str = "Pred",
     device: Literal["cuda", "cpu"] = "cuda",
+    *,
+    sup=None,
 ) -> Path:
     """Place anatomical landmarks on an intraoral surface scan.
 
@@ -58,8 +60,17 @@ def run(
     Returns:
         The output directory, holding the markups files and the run report.
 
-    The meshes must already carry tooth labels: run `Crown_Seg` over them first
-    and pass its output here. This tool does not call another one.
+    The landmark networks are pointed at teeth, so a mesh has to carry a
+    per-point tooth-label array. One that does not is sent to `Crown_Seg`
+    through the supervisor and processed after the meshes that already had
+    theirs -- the ready ones first, so their landmarks are on disk before a
+    second of segmentation is spent, and `segmented_on_the_fly` in the run
+    report says which meshes needed it. A mesh `Crown_Seg` cannot label is
+    reported as that one mesh failing, never as the batch failing.
+
+    With no supervisor -- a direct call, or a server too old to inject one --
+    an unlabelled mesh refuses the batch as it always did, naming `Crown_Seg`:
+    run it over the meshes yourself and pass its output here.
     """
     # torch and pytorch3d are imported inside the engine: CI imports this
     # module on every PR to publish the schema, and that must not cost a CUDA
@@ -72,5 +83,6 @@ def run(
         ios_networks=networks,
         prediction_ID=prediction_ID,
         device=device,
+        sup=sup,
     )
     return output_dir
