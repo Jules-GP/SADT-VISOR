@@ -31,7 +31,19 @@ _OUTPUTS = "Outputs"
 LAYOUT = {
     "input": {"section": _INPUTS, "label": "Scan or Folder"},
     "model": {"section": _INPUTS, "label": "Model Bundle"},
-    "regions": {"section": _LANDMARKS, "label": "Regions", "ui": "inline"},
+    # Not rendered, and this is the ONE hint here that is not about looks.
+    # `SlicerAutomatedDentalTools` never offered a region selection: its
+    # `ALI.ui` contains the word "region" zero times, and the anatomical groups
+    # appear only as the NAMES OF THE TABS over the landmarks. A clinician
+    # coming from that extension is looking for a control that was never there,
+    # beside a landmark list that already carries the same grouping.
+    #
+    # Hiding it costs nothing it could do: `run()` keeps its default (every
+    # region on), and asking for one region is now one click on that region's
+    # tab -- which sends the landmarks explicitly, exactly as the original did
+    # (`LandmarkTabWidget.GetSelected`, a list of landmark names).
+    "regions": {"section": _LANDMARKS, "label": "Regions", "ui": "inline",
+                "hidden": True},
     "landmarks": {
         "section": _LANDMARKS,
         "label": "Individual landmarks",
