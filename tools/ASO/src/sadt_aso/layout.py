@@ -72,11 +72,12 @@ LAYOUT = {
         },
         "visible_when": _CBCT_ONLY,
     },
-    "landmark_model": {
-        "section": _CBCT,
-        "label": "Landmark model bundle",
-        "visible_when": _CBCT_PREDICTED,
-    },
+    # Found in the same model folder the server already hands over -- one
+    # directory per landmark, which is the shape ALI_CBCT lays its weights
+    # out in. A clinician choosing a fully-automated run is not choosing
+    # which weights predict; they are asking not to place points by hand.
+    "landmark_model": {"section": _CBCT, "label": "Landmark model bundle",
+                       "hidden": True},
     # Detected from the data (see dispatch._run_cbct), so the panel does not
     # put the question to a clinician who cannot see the answer either.
     # Still an argument: a caller who knows better can force it.
