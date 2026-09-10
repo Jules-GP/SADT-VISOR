@@ -117,6 +117,80 @@ LABELS["MG"] = {
     str(number): [MG_OUTPUT_NAME[index]] for index, number in enumerate(MG_TEETH)
 }
 
+
+# ---------------------------------------------------------------------------
+# What each landmark IS, in words
+# ---------------------------------------------------------------------------
+
+# A landmark is a CODE. `UR1MB` names no anatomy a clinician can read off it,
+# and the argument's own description covers all 153 at once -- so the schema
+# publishes one line per option and the panel shows it on the option itself.
+
+# Position in its quadrant, counted from the midline outward. The universal
+# numbers above are the authority; this is the same arch read as words.
+_TEETH_FROM_MIDLINE = (
+    "central incisor", "lateral incisor", "canine", "first premolar",
+    "second premolar", "first molar", "second molar", "third molar",
+)
+
+
+def _tooth_name(number: int) -> str:
+    """Universal number -> the tooth it names.
+
+    Universal numbering runs 1-16 across the upper arch from the patient's
+    RIGHT, then 17-32 across the lower arch from the patient's LEFT, so each
+    quadrant counts toward the midline or away from it depending which one it
+    is. Derived rather than tabulated, so it cannot drift from the numbers.
+    """
+    if 1 <= number <= 8:
+        return "upper right " + _TEETH_FROM_MIDLINE[8 - number]
+    if 9 <= number <= 16:
+        return "upper left " + _TEETH_FROM_MIDLINE[number - 9]
+    if 17 <= number <= 24:
+        return "lower left " + _TEETH_FROM_MIDLINE[24 - number]
+    if 25 <= number <= 32:
+        return "lower right " + _TEETH_FROM_MIDLINE[number - 25]
+    return "tooth {}".format(number)
+
+
+# Where on the tooth the point sits. The words are this module's own header:
+# Occlusal is the occlusal point plus the mesio- and disto-buccal ones,
+# Cervical the cervical lingual and buccal, Mucogingival the gingival margin.
+_POINT_NAMES = {
+    "O": "occlusal point",
+    "MB": "mesio-buccal point",
+    "DB": "disto-buccal point",
+    "CL": "cervical lingual point",
+    "CB": "cervical buccal point",
+    "MG": "gingival margin point",
+}
+
+
+def _describe_landmarks() -> dict:
+    """{landmark: "<tooth> -- <point> (universal <n>)"}, from LABELS.
+
+    Read out of `LABELS` and never off the label's own spelling. That is not
+    fussiness: the mucogingival names are assigned POSITIONALLY and the midline
+    name shifts the right side by one, so `LR1MG` sits on tooth 26 and parsing
+    it as "LR1" would put it on 25 -- naming the wrong tooth in a tooltip a
+    clinician is about to trust. `LABELS` is where the truth already is.
+    """
+    described = {}
+    for network, table in LABELS.items():
+        for number, labels in table.items():
+            tooth = _tooth_name(int(number))
+            for label in labels:
+                # Longest first: "MB" and "B" would both match a name ending in
+                # "MB", and the longer one is the one that means something.
+                suffix = next((code for code in sorted(_POINT_NAMES, key=len, reverse=True)
+                               if label.endswith(code)), "")
+                point = _POINT_NAMES.get(suffix, "landmark")
+                described[label] = "{} -- {} (universal {})".format(tooth, point, number)
+    return described
+
+
+DESCRIPTIONS = _describe_landmarks()
+
 # Jaw a Universal tooth number belongs to.
 JAW_OF_NUMBER = {
     number: jaw for jaw, teeth in UNIVERSAL_NUMBERS.items() for number in teeth.values()

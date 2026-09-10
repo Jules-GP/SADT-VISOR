@@ -377,3 +377,33 @@ def test_a_selection_naming_nothing_that_exists_is_refused(tmp_path, stub_engine
         )
 
     assert "UR3RIP" in str(raised.value)
+
+
+def test_every_landmark_says_what_it_is():
+    """A landmark is a code. `UR1MB` names no anatomy a clinician can read off
+    it, so the schema publishes one line per option."""
+    from sadt_ali_ios import catalog
+
+    assert set(catalog.DESCRIPTIONS) == set(catalog.LANDMARKS)
+    assert all(text.strip() for text in catalog.DESCRIPTIONS.values())
+
+
+def test_a_description_names_the_tooth_the_ENGINE_uses_not_the_one_the_name_suggests():
+    """The trap this exists to avoid. Mucogingival names are assigned
+    POSITIONALLY and the midline name shifts the right side by one, so `LR1MG`
+    sits on tooth 26 -- reading it as "LR1" would put it on 25 and name the
+    wrong tooth in a tooltip a clinician is about to trust."""
+    from sadt_ali_ios import catalog
+
+    assert catalog.DESCRIPTIONS["LR1MG"].startswith("lower right lateral incisor")
+    assert "universal 26" in catalog.DESCRIPTIONS["LR1MG"]
+    # The midline name itself, which no quadrant spelling could produce.
+    assert catalog.DESCRIPTIONS["L0MG"].startswith("lower right central incisor")
+
+
+def test_the_words_travel_with_the_argument():
+    """Declared by the tool, published by the schema: a landmark gains its line
+    with no client release."""
+    from sadt_ali_ios import catalog, layout
+
+    assert layout.LAYOUT["landmarks"]["option_help"] is catalog.DESCRIPTIONS

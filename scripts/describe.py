@@ -110,7 +110,12 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # Arguments naming one cell are drawn together in it.
                "cell",
                # What each of a vec2's two numbers is, written beside its box.
-               "x_label", "y_label")
+               "x_label", "y_label",
+               # {option: one line saying what that option is}. For a catalogue
+               # whose options are CODES -- ALI publishes `UR1MB` and `Ba` -- the
+               # label alone tells a clinician nothing, and the argument's own
+               # description covers all of them at once.
+               "option_help")
 
 LAYOUT_MODULE = "layout"
 

@@ -55,6 +55,11 @@ LAYOUT = {
         # restated -- and an intraoral scan being one arch, the tab a clinician
         # opens is usually the only one they need.
         "ui": "tabs",
+        # One line per landmark, so hovering `UR1MB` says which tooth and where
+        # on it. Derived in the catalog from the table the engine itself indexes
+        # by, never from the label's spelling -- the mucogingival names are
+        # positional and the midline one shifts the right side by a tooth.
+        "option_help": catalog.DESCRIPTIONS,
         "groups": {
             name: list(labels) for name, labels in catalog.LANDMARK_GROUPS.items()
         },
