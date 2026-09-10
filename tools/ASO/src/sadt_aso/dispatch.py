@@ -39,6 +39,7 @@ import os
 import shutil
 
 from . import catalogs
+from . import markups
 from . import progress
 from .scans import split_scan_extension
 from .cbct import dicom
@@ -161,6 +162,17 @@ def orient(
     try:
         input_root = _as_directory(input_path, os.path.join(work_dir, "input"))
         reference_root = _as_directory(reference_path, os.path.join(work_dir, "reference"))
+        # Either a bundle, or the folder that HOLDS the bundles. The server
+        # fills a hidden hosted-model argument with the whole of
+        # `DATA/ASO/models/`, so both shapes arrive here and the difference is
+        # visible: a bundle carries markups, a folder of bundles does not.
+        if not _is_reference_bundle(reference_root):
+            reference_root = choose_reference(
+                reference_root,
+                modality,
+                selection["cbct_landmarks"] if modality == catalogs.MODALITY_CBCT else [],
+            )
+            report["reference"] = os.path.basename(reference_root.rstrip(os.sep))
 
         if modality == catalogs.MODALITY_CBCT:
             _run_cbct(
@@ -294,6 +306,136 @@ def _no_landmarks_reason(key: str, markups_paths: list, orphans: list) -> str:
         "send the whole FOLDER rather than the single scan file, pass them in "
         "'landmarks', or use Fully-Automated mode to have them predicted"
     )
+
+
+def choose_reference(models_root: str, modality: str, requested: list) -> str:
+    """The reference bundle inside `models_root`, chosen by what it carries.
+
+    There is no choice here for a clinician to make, and that is the point. A
+    reference defines the target frame through what it CARRIES, and the two
+    published CBCT bundles carry disjoint landmark sets -- Frankfurt Horizontal
+    + Midsagittal has Ba/S/N/RPo/LPo/ROr/LOr, Occlusal + Midsagittal has
+    ANS/IF/PNS/UL6O/UR1O/UR6O. So the selection already says which one applies;
+    asking again could only produce a pairing that fails every patient
+    separately, which is the failure `_check_selection_against_reference` exists
+    to explain.
+
+    The original extension asked for a FOLDER -- somewhere on the clinician's
+    own disk, with a button offering to download one of the two. Here the
+    bundles are on the server, so the folder question has no answer left to
+    give.
+
+    Each modality recognises its own shape, the way every engine in this project
+    recognises its own weights: a CBCT reference carries markups, an IOS one
+    carries labelled surfaces. A bundle of neither -- ALI's `.pth` files sit in
+    the same folder -- is not a reference and is never offered.
+    """
+    markups_bundles, surface_bundles = {}, []
+    for name in sorted(os.listdir(models_root)):
+        directory = os.path.join(models_root, name)
+        if not os.path.isdir(directory):
+            continue
+        # Surfaces decide, not the absence of markups: the published intraoral
+        # bundle carries BOTH -- `Upper_gold.vtk` beside `Upper_gold.json` --
+        # and classifying it by its markups would file the one IOS reference
+        # under CBCT. A CBCT bundle carries markups beside a VOLUME, never a
+        # mesh, so "has a mesh" separates them with nothing left over.
+        if _holds_surfaces(directory):
+            surface_bundles.append(name)
+            continue
+        landmarks = _reference_landmarks(directory)
+        if landmarks:
+            markups_bundles[name] = landmarks
+
+    if modality == catalogs.MODALITY_IOS:
+        return _only_one(models_root, surface_bundles, "intraoral")
+
+    wanted = set(requested)
+    fits = sorted(name for name, labels in markups_bundles.items()
+                  if wanted and wanted <= set(labels))
+    if len(fits) == 1:
+        return os.path.join(models_root, fits[0])
+    if not markups_bundles:
+        raise ToolInputError(
+            "No CBCT reference bundle on this server. Stage one with "
+            "`setup-models.sh --tool ASO`."
+        )
+    offered = "; ".join(
+        "'{}' carries {}".format(name, ", ".join(sorted(labels)))
+        for name, labels in sorted(markups_bundles.items())
+    )
+    if not fits:
+        raise ToolInputError(
+            "No reference on this server carries every landmark you selected "
+            "({}). {}. Select landmarks one of them supports.".format(
+                ", ".join(sorted(wanted)) or "none", offered)
+        )
+    raise ToolInputError(
+        "Several references carry the landmarks you selected, so which target "
+        "frame to orient onto is ambiguous: {}. Name one in 'reference'.".format(
+            ", ".join(fits))
+    )
+
+
+def _only_one(models_root: str, names: list, what: str) -> str:
+    """The single bundle of its kind, or a refusal naming what was found."""
+    if len(names) == 1:
+        return os.path.join(models_root, names[0])
+    if not names:
+        raise ToolInputError(
+            "No {} reference bundle on this server. Stage one with "
+            "`setup-models.sh --tool ASO`.".format(what)
+        )
+    raise ToolInputError(
+        "Several {} reference bundles are staged, so which one to orient onto "
+        "is ambiguous: {}. Name one in 'reference'.".format(what, ", ".join(sorted(names)))
+    )
+
+
+def _reference_landmarks(directory: str) -> list:
+    """The labels the first markups file in `directory` holds, or []."""
+    for where, _subdirs, names in sorted(os.walk(directory)):
+        for name in sorted(names):
+            if markups.is_markups_file(name) and not name.startswith("."):
+                try:
+                    landmarks = markups.load_landmarks(os.path.join(where, name))
+                except Exception:  # noqa: BLE001 - unreadable is "not a bundle"
+                    continue
+                if landmarks:
+                    return list(landmarks)
+    return []
+
+
+def _is_reference_bundle(directory: str) -> bool:
+    """Whether this directory IS a reference, rather than the folder of them.
+
+    Answered on the TOP LEVEL only, and that is the whole trick: a bundle keeps
+    its markups or its meshes right there, while `DATA/ASO/models/` keeps only
+    directories. Asked recursively the models folder would look like a bundle,
+    because one of its children is.
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    return any(
+        markups.is_markups_file(name) or name.lower().endswith((".vtk", ".vtp", ".stl"))
+        for name in names
+        if os.path.isfile(os.path.join(directory, name))
+    )
+
+
+def _holds_surfaces(directory: str) -> bool:
+    """Whether anything under `directory` is a surface mesh.
+
+    What an IOS reference is: the engine takes tooth centroids off a labelled
+    mesh rather than reading landmarks from a file, so a bundle carrying no
+    markups at all is exactly right there and would be nothing anywhere else.
+    """
+    for _where, _subdirs, names in os.walk(directory):
+        if any(name.lower().endswith((".vtk", ".vtp", ".stl")) for name in names):
+            return True
+    return False
 
 
 def _check_selection_against_reference(requested: list, reference_landmarks: dict) -> None:

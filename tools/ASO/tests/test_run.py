@@ -1666,3 +1666,59 @@ def test_an_empty_folder_is_not_a_series():
     from sadt_aso.cbct import dicom
 
     assert not dicom.holds_a_series(tempfile.mkdtemp())
+
+
+def test_the_reference_is_chosen_by_what_the_selection_needs():
+    """No choice here for a clinician to make. The two published CBCT bundles
+    carry DISJOINT landmark sets, so the selection already says which target
+    frame applies; asking again could only produce a pairing that fails every
+    patient separately."""
+    import os
+    from sadt_aso import catalogs, dispatch
+
+    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
+    if not os.path.isdir(os.path.join(models, "IOS_Gold_file")):
+        import pytest
+        pytest.skip("the ASO reference bundles are not staged on this machine")
+
+    frankfurt = ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"]
+    occlusal = ["ANS", "IF", "PNS", "UL6O", "UR1O", "UR6O"]
+
+    assert "Frankfurt" in dispatch.choose_reference(models, catalogs.MODALITY_CBCT, frankfurt)
+    assert "Occlusal" in dispatch.choose_reference(models, catalogs.MODALITY_CBCT, occlusal)
+    assert "IOS" in dispatch.choose_reference(models, catalogs.MODALITY_IOS, [])
+
+
+def test_a_selection_no_reference_supports_is_refused_by_name():
+    """Mixing the two frames names what each one offers, rather than orienting
+    onto one of them quietly."""
+    import os
+    from sadt_aso import catalogs, dispatch
+    from sadt_aso.errors import ToolInputError
+    import pytest
+
+    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
+    if not os.path.isdir(os.path.join(models, "IOS_Gold_file")):
+        pytest.skip("the ASO reference bundles are not staged on this machine")
+
+    with pytest.raises(ToolInputError) as caught:
+        dispatch.choose_reference(models, catalogs.MODALITY_CBCT, ["Ba", "ANS"])
+    assert "Frankfurt" in str(caught.value) and "Occlusal" in str(caught.value)
+
+
+def test_the_models_folder_is_not_mistaken_for_a_bundle():
+    """Asked on the TOP LEVEL only: a bundle keeps its markups or its meshes
+    right there, while the models folder keeps only directories. Asked
+    recursively the folder would look like a bundle, because a child is one."""
+    import os
+    from sadt_aso import dispatch
+
+    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
+    if not os.path.isdir(os.path.join(models, "IOS_Gold_file")):
+        import pytest
+        pytest.skip("the ASO reference bundles are not staged on this machine")
+
+    assert not dispatch._is_reference_bundle(models)
+    assert dispatch._is_reference_bundle(os.path.join(models, "IOS_Gold_file"))
+    # ALI's landmark weights live in the same folder and are not a reference.
+    assert not dispatch._is_reference_bundle(os.path.join(models, "CBCT_landmark_models"))

@@ -37,7 +37,13 @@ _CBCT_PREDICTED = {
 
 LAYOUT = {
     "input": {"section": _INPUTS, "label": "Scan / Landmark Folder"},
-    "reference": {"section": _INPUTS, "label": "Reference"},
+    # Chosen by what the selection needs, not by the clinician (see
+    # dispatch.choose_reference). The original extension asked for a FOLDER on
+    # the user's own disk; here the bundles are on the server, and which one
+    # applies is already settled by the landmarks being registered on -- the two
+    # CBCT references carry disjoint sets. Still an argument: naming one is how
+    # a caller uses a reference of their own.
+    "reference": {"section": _INPUTS, "label": "Reference", "hidden": True},
     "modality": {"section": _INPUTS, "label": "Input Type"},
     "automation": {"section": _INPUTS, "label": "Mode"},
     # Landmarks a caller supplies rather than has predicted: what ALI wrote on

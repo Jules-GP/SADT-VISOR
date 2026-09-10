@@ -123,7 +123,7 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
     A previous run's outputs are used only when a patient has nothing else.
     """
     patients: dict = {}
-    unnamed: list = []
+    unnamed = 0
 
     for directory, _, file_names in os.walk(input_root):
         relative = os.path.relpath(directory, input_root)
@@ -137,8 +137,11 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
                 continue
             try:
                 stem, jaw = patient_and_jaw(file_name, output_suffix)
-            except JawError as exc:
-                unnamed.append(str(exc))
+            except JawError:
+                # Counted, not collected: every JawError quotes the file it
+                # came from, and that name is patient metadata the moment it
+                # reaches a log.
+                unnamed += 1
                 continue
             entry = patients.setdefault(os.path.join(prefix, stem), {})
             jaw_entry = entry.setdefault(
@@ -149,8 +152,14 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
                 kind = f"old_{kind}"
             jaw_entry[kind].append(os.path.join(directory, file_name))
 
-    for message in unnamed:
-        logger.warning("%s", message)
+    if unnamed:
+        # How many were skipped and what to do about it, which is the whole of
+        # the diagnosis here: the reason is the same for every one of them.
+        logger.warning(
+            "%d file(s) skipped: nothing in the name says which jaw it is. Name "
+            "them so a token does, e.g. 'P1_U_Seg.vtk' / 'P1_Lower.vtk'.",
+            unnamed,
+        )
 
     return {
         key: {
