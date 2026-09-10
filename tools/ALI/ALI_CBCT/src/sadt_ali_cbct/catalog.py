@@ -154,3 +154,104 @@ def landmarks_in(codes) -> tuple:
     return tuple(
         label for code, labels in GROUP_LABELS.items() if code in wanted for label in labels
     )
+
+
+# ---------------------------------------------------------------------------
+# What each landmark IS, in words
+# ---------------------------------------------------------------------------
+
+# A landmark is a CODE. `UR6MB` and `Ba` name no anatomy a clinician can read
+# off them, and the argument's own description covers all 119 at once -- so the
+# schema publishes one line per option and the panel shows it on the option.
+#
+# Sourced, never guessed. Everything below comes from Gillot et al. 2023,
+# "Automatic landmark identification in cone-beam computed tomography",
+# Orthod Craniofac Res (PMC10440369), Table 1 -- written here in this file's
+# own words rather than copied. Landmarks the paper's Table 1 does not reach
+# are DELIBERATELY ABSENT: an option with no line shows no tooltip, which is
+# what it had before, while a wrong line is a point placed wrongly.
+
+# Counted from the midline outward, which is what the digit in a name gives.
+# Confirmed twice: ALI_IOS's `UNIVERSAL_NUMBERS` maps `UR1` to universal 8,
+# `UR3` to 6 and `UR6` to 3 (central incisor, canine, first molar in the ADA
+# system), and Table 1 names `UR6` the maxillary right first molar, `UR3` the
+# maxillary right canine and `UR1` the maxillary right incisor.
+_FROM_MIDLINE = (
+    "central incisor", "lateral incisor", "canine", "first premolar",
+    "second premolar", "first molar", "second molar", "third molar",
+)
+
+_QUADRANTS = {
+    "UR": "upper right", "UL": "upper left",
+    "LR": "lower right", "LL": "lower left",
+}
+
+# Where on the tooth the point sits, from Table 1. `MP`, `OIP` and `RIP` are
+# absent on purpose: the paper's Table 1 does not reach them, and this file
+# does not invent anatomy.
+# Two of them read differently along the arch, and Table 1 spells both cases
+# out -- but they do not change at the same tooth. `O` is an incisal edge on an
+# incisor and a cusp tip from the canine back (`UR1O` vs `UR3O`); `R` is a root
+# canal on anything anterior and a pulp chamber floor on a molar (`UR3R` vs
+# `UR6R`). Each suffix therefore carries its OWN boundary rather than sharing
+# one, which is how a tooltip on a canine stops talking about incisal edges.
+#
+# (position at which the second reading starts, before it, from it on)
+_POINT_NAMES = {
+    "O": (3, "incisal edge, at its midpoint", "cusp tip"),
+    "R": (6, "root canal, at the level of the CEJ", "pulp chamber floor, at its centre"),
+    "MB": (0, "mesio-buccal cusp", "mesio-buccal cusp"),
+    "DB": (0, "disto-buccal cusp", "disto-buccal cusp"),
+}
+
+
+# The named craniofacial points Table 1 defines. The other 46 this catalog
+# offers are listed in the paper's Supplementary Table 1, which names them
+# without defining them -- so they are left for a clinician to fill in.
+_NAMED_POINTS = {
+    "Ba": "Basion -- the anterior margin of the foramen magnum, at its most "
+          "posteroinferior point",
+    "S": "Sella -- the centre of the sella turcica",
+    "N": "Nasion -- the nasofrontal suture, at its most anterosuperior point",
+    "A": "A point -- the deepest point of the concavity of the anterior maxilla",
+    "ANS": "Anterior nasal spine",
+    "PNS": "Posterior nasal spine",
+    "B": "B point -- the deepest point of the concavity of the mandibular symphysis",
+    "Pog": "Pogonion -- the most anterior point of the mandibular symphysis",
+    "Gn": "Gnathion -- on the symphysis, between Pogonion and Menton",
+    "Me": "Menton -- the most inferior point of the chin",
+    "RCo": "Right condyle -- its superior and central point",
+    "LCo": "Left condyle -- its superior and central point",
+    "RGo": "Right gonion -- the angle of the mandible",
+    "LGo": "Left gonion -- the angle of the mandible",
+}
+
+
+def _describe(label: str) -> str:
+    """One line for `label`, or "" when this file cannot source one."""
+    if label in _NAMED_POINTS:
+        return _NAMED_POINTS[label]
+    quadrant, digit = label[:2], label[2:3]
+    side = _QUADRANTS.get(quadrant)
+    if side is None or not digit.isdigit():
+        return ""
+    position = int(digit)
+    if not 1 <= position <= len(_FROM_MIDLINE):
+        return ""
+    # Longest first: "MB" and "B" would both match a name ending in "MB".
+    point = _POINT_NAMES.get(label[3:])
+    if point is None:
+        return ""
+    boundary, before, onward = point
+    return "{} {} -- {}".format(
+        side, _FROM_MIDLINE[position - 1],
+        onward if position >= boundary else before,
+    )
+
+
+DESCRIPTIONS = {
+    label: _describe(label)
+    for labels in GROUP_LABELS.values()
+    for label in labels
+    if _describe(label)
+}
