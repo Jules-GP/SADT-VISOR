@@ -115,7 +115,10 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # whose options are CODES -- ALI publishes `UR1MB` and `Ba` -- the
                # label alone tells a clinician nothing, and the argument's own
                # description covers all of them at once.
-               "option_help")
+               "option_help",
+               # How few options a multichoice may be left with; absent means
+               # none is a meaningful answer.
+               "min_selected")
 
 LAYOUT_MODULE = "layout"
 

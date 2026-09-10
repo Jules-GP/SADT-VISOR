@@ -42,11 +42,16 @@ LAYOUT = {
             for group, codes in catalog.STRUCTURE_GROUPS.items()
         },
         "option_help": _STRUCTURE_HELP,
+        # `pipeline` refuses a run with none of these, so the panel says so
+        # before Apply rather than after a request.
+        "min_selected": 1,
     },
     "merge": {
         # Two options and no grouping: a plain pair of check boxes says it, and
         # both may be ticked at once, which is exactly what a check box means
         # and what a pair of chips would not.
         "option_help": _MERGE_HELP,
+        # A run has to produce SOMETHING. Same rule, same reason.
+        "min_selected": 1,
     },
 }
