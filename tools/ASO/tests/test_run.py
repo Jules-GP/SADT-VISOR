@@ -11,6 +11,7 @@ back.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -1502,3 +1503,166 @@ def test_arguments_naming_hosted_weights_end_in_model_or_reference():
         assert is_hosted(name), name
     # And nothing else claims to be hosted by accident.
     assert {name for name in paths if is_hosted(name)} == hosted
+
+
+# ---------------------------------------------------------------------------
+# Progress -- what a client watching a forty-patient run is shown
+# ---------------------------------------------------------------------------
+
+def _events(path) -> list:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+
+
+def test_the_cbct_phases_report_where_they_have_got_to(tmp_path, monkeypatch):
+    """One event per patient per phase, and the fraction only ever rises.
+
+    Three loops share the bar -- recentring, then registration -- and each is
+    given the slice of the run it occupies. Without that the second phase sends
+    the bar back to zero, which reads as a run starting over.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _cbct_case(tmp_path / "input", key="patient1")
+    _cbct_case(tmp_path / "input", key="patient2")
+
+    dispatch.orient(
+        input_path=str(tmp_path / "input"),
+        reference_path=_cbct_reference(tmp_path),
+        modality=catalogs.MODALITY_CBCT,
+        automation=catalogs.AUTOMATION_SEMI,
+        cbct_landmarks=list(_REFERENCE_POINTS),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    events = _events(events_file)
+    assert [event["message"] for event in events] == [
+        "centring scan 1 of 2", "centring scan 2 of 2",
+        "orienting patient 1 of 2", "orienting patient 2 of 2",
+    ]
+    fractions = [event["fraction"] for event in events]
+    assert fractions == sorted(fractions)
+    # No patient's name, no file name: a progress message is stored on the
+    # server and shown, and either one is patient metadata.
+    assert not any("patient1" in event["message"] for event in events)
+
+
+def test_the_ios_batch_reports_one_event_per_patient(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _ios_case(tmp_path / "input", key="patient1")
+
+    dispatch.orient(
+        input_path=str(tmp_path / "input"),
+        reference_path=_ios_reference(tmp_path),
+        modality=catalogs.MODALITY_IOS,
+        automation=catalogs.AUTOMATION_FULLY,
+        output_dir=str(tmp_path / "out"),
+    )
+
+    assert [event["message"] for event in _events(events_file)] == [
+        "orienting patient 1 of 1",
+    ]
+
+
+def test_the_landmark_waypoint_reaches_the_supervisor(tmp_path):
+    """The one thing `FakeSup.messages` exists for, and nothing asserted on it.
+
+    The waypoint is what tells a watcher the run has left ASO and is inside the
+    landmark tool -- the longest single step of a fully-automated run, and the
+    one a bar frozen at 20% would otherwise be unexplained by.
+    """
+    root = tmp_path / "input"
+    _write_scan(root / "patient1_scan.nii.gz")
+    sup = FakeSup({"patient1": _predicted()}, tmp_path)
+
+    _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
+        landmark_model="Bundle", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
+    )
+
+    assert (0.2, f"predicting landmarks with {dispatch.LANDMARK_TOOL}") in sup.messages
+
+
+# ---------------------------------------------------------------------------
+# What reaches the log: a position, never a patient
+# ---------------------------------------------------------------------------
+
+def test_an_unreadable_markups_file_is_logged_without_its_name(tmp_path, caplog):
+    """The rule the progress messages follow, applied to the log.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log, so a name
+    written here outlives the run. The unobvious half is that the exception's
+    MESSAGE cannot travel either: `markups.load_landmarks` quotes the file's
+    own name in it, so passing `exc` through would put the name straight back.
+    """
+    bad = tmp_path / "Smith_John_T1_lm.mrk.json"
+    bad.write_text(json.dumps({"markups": []}))
+
+    with caplog.at_level(logging.INFO, logger="sadt_aso.cbct.pipeline"):
+        assert cbct_pipeline.load_landmarks([str(bad)]) == {}
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == ["Skipping markups file 1 of 1: ValueError"], messages
+
+
+def test_a_landmark_file_the_landmark_tool_wrote_is_skipped_without_its_name(
+    tmp_path, caplog
+):
+    """Same rule on the collection side: these files are named after the
+    caller's scans, so their names are the caller's too."""
+    (tmp_path / "Smith_John_T1_Pred.mrk.json").write_text(json.dumps({"markups": []}))
+
+    with caplog.at_level(logging.INFO, logger="sadt_aso.dispatch"):
+        assert dispatch._collect(str(tmp_path)) == {}
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "Skipping a landmark file the landmark tool wrote: ValueError"
+    ], messages
+
+
+def test_meshes_with_no_jaw_in_the_name_are_counted_not_named(tmp_path, caplog):
+    """How many, and what to do about it -- which is the whole diagnosis, the
+    reason being the same for every one of them. The JawError quotes the file
+    it came from, so the messages themselves are never what is logged."""
+    (tmp_path / "Smith_John.vtk").write_bytes(b"")
+    (tmp_path / "Jones_Mary.vtk").write_bytes(b"")
+
+    with caplog.at_level(logging.INFO, logger="sadt_aso.ios.pipeline"):
+        assert ios_pipeline.discover(str(tmp_path), "Or") == {}
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, messages
+    assert messages[0].startswith("2 file(s) skipped: nothing in the name says")
+    assert not any("Smith_John" in m or "Jones_Mary" in m for m in messages), messages
+
+
+def test_a_dicom_tree_is_recognised_without_being_declared():
+    """The panel used to ask "Input is DICOM". A clinician cannot tell either:
+    DICOM slices routinely carry no extension, so the question was one they had
+    to guess at, and guessing wrong produced a run that failed for a reason
+    nobody could see."""
+    import os
+    from sadt_aso.cbct import dicom
+
+    testfiles = "/home/luciacev/code/VISOR-serve/DATA/ASO/testfiles"
+    if not os.path.isdir(os.path.join(testfiles, "CBCT_FullyAuto_DCM")):
+        import pytest
+        pytest.skip("the ASO test files are not staged on this machine")
+
+    assert dicom.holds_a_series(os.path.join(testfiles, "CBCT_FullyAuto_DCM"))
+    assert dicom.holds_a_series(os.path.join(testfiles, "CBCT_SemiAuto_DCM"))
+    # And the NIfTI forms of the same cohorts are not mistaken for one.
+    assert not dicom.holds_a_series(os.path.join(testfiles, "CBCT_FullyAuto"))
+    assert not dicom.holds_a_series(os.path.join(testfiles, "CBCT_SemiAuto"))
+
+
+def test_an_empty_folder_is_not_a_series():
+    """GDCM raises on a directory it cannot scan, which is "no series here",
+    not a failure of the run."""
+    import tempfile
+    from sadt_aso.cbct import dicom
+
+    assert not dicom.holds_a_series(tempfile.mkdtemp())

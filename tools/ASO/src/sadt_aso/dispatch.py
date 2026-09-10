@@ -39,6 +39,7 @@ import os
 import shutil
 
 from . import catalogs
+from . import progress
 from .scans import split_scan_extension
 from .cbct import dicom
 from .cbct import pipeline as cbct_pipeline
@@ -435,7 +436,15 @@ def _collect(output_dir: str) -> dict:
             try:
                 found = markups.load_landmarks(os.path.join(directory, file_name))
             except (ValueError, OSError) as exc:
-                logger.warning("Skipping '%s': %s", file_name, exc)
+                # No name and no message: these files are named after the
+                # caller's scans, and the ValueError `markups.load_landmarks`
+                # raises quotes that name. There is no position to give either
+                # -- this is a walk of a tree, not a pass over a batch -- so
+                # the failure's type is the whole diagnosis.
+                logger.warning(
+                    "Skipping a landmark file the landmark tool wrote: %s",
+                    type(exc).__name__,
+                )
                 continue
             predictions.setdefault(key, {}).update(found)
     return predictions
@@ -449,7 +458,12 @@ def _run_cbct(
     input_root, reference_root, automation, requested, landmarks_path, landmark_model,
     dicom_input, output_dir, work_dir, suffix, max_triplets, seed, report, sup,
 ) -> None:
-    if dicom_input:
+    # Asked of the DATA, not of the caller. DICOM slices routinely carry no
+    # extension, so a clinician could not tell from a file name either -- and
+    # answering wrong produced a run that failed for a reason nobody could see.
+    # `dicom_input` remains an OVERRIDE for a caller who knows better than the
+    # detector, which is why it stays in the signature and leaves the panel.
+    if dicom_input or dicom.holds_a_series(input_root):
         input_root = dicom.convert_tree(input_root, os.path.join(work_dir, "dicom_nifti"))
 
     reference_landmarks = cbct_pipeline.load_reference(reference_root)
@@ -505,7 +519,13 @@ def _run_cbct(
     # the Slicer chain did, PRE_ASO_CBCT before ALI_CBCT), so in fully-automated
     # mode they have to reach disk before it is called.
     prepared = {}
-    for key, entry in sorted(patients.items()):
+    # Three phases share the bar, and each is given the slice it occupies so
+    # the second does not send it back to zero. The boundaries are where the
+    # landmark waypoint below already put them: recentring up to 0.2, the
+    # landmark tool from there, registration on the tail. What is exact is the
+    # counter in the message; the split between phases is a weighting.
+    for index, (key, entry) in enumerate(sorted(patients.items()), start=1):
+        progress.report(index, len(patients), "centring scan", end=0.2)
         _, extension = split_scan_extension(os.path.basename(entry["scan"]))
         destination = (
             os.path.join(
@@ -550,8 +570,12 @@ def _run_cbct(
             )
             entry["landmarks"] = cbct_pipeline.center_landmarks(found, entry["translation"])
 
-    # Phase 3 -- register and write.
-    for key, entry in sorted(prepared.items()):
+    # Phase 3 -- register and write. It starts where the landmark tool left
+    # off, which is only where semi-automated ends its own phase 1: there is no
+    # prediction between them, so the bar must not skip the slice it never used.
+    registration_start = 0.6 if fully else 0.2
+    for index, (key, entry) in enumerate(sorted(prepared.items()), start=1):
+        progress.report(index, len(prepared), "orienting patient", start=registration_start)
         if not entry["landmarks"]:
             report["patients"][key] = {
                 "status": "failed",
@@ -614,7 +638,8 @@ def _run_ios(
     landmark_keys = catalogs.landmark_keys_by_jaw(teeth, landmark_types)
     driving = catalogs.DRIVING_JAW[occlusion]
 
-    for key, entry in sorted(patients.items()):
+    for index, (key, entry) in enumerate(sorted(patients.items()), start=1):
+        progress.report(index, len(patients), "orienting patient")
         report["patients"][key] = ios_pipeline.orient_patient(
             jaws=entry,
             reference=reference,

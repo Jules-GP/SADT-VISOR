@@ -71,11 +71,10 @@ LAYOUT = {
         "label": "Landmark model bundle",
         "visible_when": _CBCT_PREDICTED,
     },
-    "dicom_input": {
-        "section": _INPUTS,
-        "label": "Input is DICOM",
-        "visible_when": _CBCT_ONLY,
-    },
+    # Detected from the data (see dispatch._run_cbct), so the panel does not
+    # put the question to a clinician who cannot see the answer either.
+    # Still an argument: a caller who knows better can force it.
+    "dicom_input": {"section": _INPUTS, "label": "Input is DICOM", "hidden": True},
 
     # -- IOS ----------------------------------------------------------------
     "ios_teeth": {
