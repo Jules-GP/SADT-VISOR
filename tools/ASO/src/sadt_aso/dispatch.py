@@ -61,6 +61,12 @@ WORK_DIRNAME = ".aso_work"
 # fifteen minutes into a job.
 LANDMARK_TOOL = "ALI_CBCT"
 
+# The DATA folder that tool's weights live in. Its own name, except where a
+# family shares one: ALI_CBCT and ALI_IOS are two engines behind the ALI
+# facade and share `DATA/ALI/`. Written here rather than derived, because
+# which is which is a deployment fact and a wrong guess is a silent miss.
+LANDMARK_DATA = "ALI"
+
 
 class OrientationRun:
     """Result of `orient()`: where the files are, and what actually happened.
@@ -174,21 +180,19 @@ def orient(
             )
             report["reference"] = os.path.basename(reference_root.rstrip(os.sep))
 
-        # Same shape, same question, for the bundle `ALI_CBCT` predicts with.
-        # It is staged in the SAME models folder -- `CBCT_landmark_models`, one
-        # directory per landmark -- so the server has already handed it over and
-        # nobody needs to name it. Only a fully-automated CBCT run reaches for
-        # it, so a server with no landmark weights is silent until then.
+        # The bundle `ALI_CBCT` predicts with is ALI'S, not a copy of it kept
+        # here. A supervised call never passes through the server's admission
+        # path, so nothing fills a hosted-model argument for it -- the caller
+        # names the bundle, and `sup.datapath` is what lets it. A DATA folder
+        # is named after the tool it belongs to, so a name is enough and no
+        # path is invented.
         if (modality == catalogs.MODALITY_CBCT
                 and automation == catalogs.AUTOMATION_FULLY
-                and landmark_model
-                # A path on disk, not a bare NAME: a caller may still name a
-                # bundle for the supervisor to resolve, and that is not ours to
-                # look inside.
-                and os.path.isdir(landmark_model)
-                and not _holds_weights(landmark_model)):
-            landmark_model = choose_landmark_bundle(landmark_model)
-            report["landmark_model"] = os.path.basename(landmark_model.rstrip(os.sep))
+                and not landmark_model
+                and sup is not None
+                and getattr(sup, "datapath", None)):
+            landmark_model = str(sup.datapath / LANDMARK_DATA / "models")
+            report["landmark_model"] = LANDMARK_DATA
 
         if modality == catalogs.MODALITY_CBCT:
             _run_cbct(
@@ -391,53 +395,6 @@ def choose_reference(models_root: str, modality: str, requested: list) -> str:
         "frame to orient onto is ambiguous: {}. Name one in 'reference'.".format(
             ", ".join(fits))
     )
-
-
-def choose_landmark_bundle(models_root: str) -> str:
-    """The bundle `ALI_CBCT` predicts with, inside the server's model folder.
-
-    Recognised by its SHAPE, the way every engine here recognises its own
-    weights: one directory per landmark, each holding a scale folder of `.pth`
-    files. Nothing else staged for ASO carries weights -- the gold references
-    carry a volume and its markups -- so there is nothing to confuse it with,
-    and a folder that has none is named as missing rather than guessed at.
-    """
-    candidates = sorted(
-        name for name in os.listdir(models_root)
-        if os.path.isdir(os.path.join(models_root, name))
-        and _holds_weights(os.path.join(models_root, name))
-    )
-    if len(candidates) == 1:
-        return os.path.join(models_root, candidates[0])
-    if not candidates:
-        raise ToolInputError(
-            "Fully-Automated CBCT predicts the landmarks with '{}', and no "
-            "landmark weights are staged for this tool. Stage them with "
-            "`setup-models.sh --tool ASO`, send the landmarks yourself in "
-            "'landmarks', or use Semi-Automated mode.".format(LANDMARK_TOOL)
-        )
-    raise ToolInputError(
-        "Several landmark bundles are staged, so which weights to predict with "
-        "is ambiguous: {}. Name one in 'landmark_model'.".format(", ".join(candidates))
-    )
-
-
-# `ALI_CBCT` lays its weights out as <bundle>/<landmark>/<scale>/*.pth, so a
-# checkpoint sits exactly two levels below the bundle -- and three below the
-# folder that holds the bundles. That difference is the whole test: asked
-# "is there a .pth anywhere below?", the models folder says yes because one of
-# its children is a bundle, and the bundle would never be looked for.
-_WEIGHTS_DEPTH = 2
-
-
-def _holds_weights(directory: str) -> bool:
-    """Whether `directory` IS a landmark bundle, rather than holding some."""
-    root = os.path.abspath(directory)
-    for where, _subdirs, names in os.walk(root):
-        depth = os.path.relpath(where, root).count(os.sep) + 1
-        if depth == _WEIGHTS_DEPTH and any(n.lower().endswith(".pth") for n in names):
-            return True
-    return False
 
 
 def _only_one(models_root: str, names: list, what: str) -> str:

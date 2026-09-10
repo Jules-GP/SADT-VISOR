@@ -1723,35 +1723,3 @@ def test_the_models_folder_is_not_mistaken_for_a_bundle():
     # ALI's landmark weights live in the same folder and are not a reference.
     assert not dispatch._is_reference_bundle(os.path.join(models, "CBCT_landmark_models"))
 
-
-def test_the_landmark_bundle_is_found_where_the_server_already_put_it():
-    """A clinician choosing a fully-automated run is not choosing which weights
-    predict; they are asking not to place points by hand. The bundle is staged
-    in the same model folder as the references and recognised by its shape --
-    one directory per landmark, each holding a scale folder of checkpoints."""
-    import os
-    from sadt_aso import dispatch
-
-    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
-    if not os.path.isdir(os.path.join(models, "CBCT_landmark_models")):
-        import pytest
-        pytest.skip("the ASO model bundles are not staged on this machine")
-
-    assert dispatch.choose_landmark_bundle(models).endswith("CBCT_landmark_models")
-
-
-def test_the_models_folder_is_not_mistaken_for_the_bundle():
-    """Weights sit two levels below a bundle and three below the folder that
-    holds them. Asked "is there a checkpoint anywhere below?", the models folder
-    says yes -- because one of its children is a bundle -- and the bundle would
-    never be looked for."""
-    import os
-    from sadt_aso import dispatch
-
-    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
-    if not os.path.isdir(os.path.join(models, "CBCT_landmark_models")):
-        import pytest
-        pytest.skip("the ASO model bundles are not staged on this machine")
-
-    assert not dispatch._holds_weights(models)
-    assert dispatch._holds_weights(os.path.join(models, "CBCT_landmark_models"))
