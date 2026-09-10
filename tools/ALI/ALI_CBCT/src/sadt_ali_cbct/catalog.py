@@ -224,6 +224,14 @@ _NAMED_POINTS = {
     "LCo": "Left condyle -- its superior and central point",
     "RGo": "Right gonion -- the angle of the mandible",
     "LGo": "Left gonion -- the angle of the mandible",
+    # Not from Table 1, and not guessed either. ASO's `DEFAULT_CBCT_LANDMARKS`
+    # is `Ba, S, N, RPo, LPo, ROr, LOr`, and that reference is published as
+    # "Frankfurt Horizontal + Midsagittal" -- a plane defined, universally, by
+    # porion and orbitale. The reference's own name is what identifies them.
+    "RPo": "Right porion -- the most superior point of the external auditory meatus",
+    "LPo": "Left porion -- the most superior point of the external auditory meatus",
+    "ROr": "Right orbitale -- the most inferior point of the infraorbital rim",
+    "LOr": "Left orbitale -- the most inferior point of the infraorbital rim",
 }
 
 

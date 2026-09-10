@@ -1227,3 +1227,16 @@ def test_the_words_travel_with_the_argument():
     from sadt_ali_cbct import catalog, layout
 
     assert layout.LAYOUT["landmarks"]["option_help"] is catalog.DESCRIPTIONS
+
+
+def test_the_frankfort_horizontal_points_are_named():
+    """ASO registers on `Ba, S, N, RPo, LPo, ROr, LOr` and publishes that
+    reference as "Frankfurt Horizontal + Midsagittal" -- a plane defined by
+    porion and orbitale. The reference's own name is what identifies them, so
+    the seven landmarks a clinician meets most often all carry a line."""
+    from sadt_ali_cbct import catalog
+
+    for label in ("Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"):
+        assert label in catalog.DESCRIPTIONS, label
+    assert "porion" in catalog.DESCRIPTIONS["RPo"].lower()
+    assert "orbitale" in catalog.DESCRIPTIONS["LOr"].lower()
