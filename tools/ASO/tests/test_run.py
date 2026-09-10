@@ -777,17 +777,35 @@ def test_the_missing_supervisor_is_reported_before_the_missing_model(tmp_path):
         )
 
 
-def test_fully_automated_cbct_needs_a_model_bundle(tmp_path):
-    """It used to be optional, because the server picked a bundle matching the
-    input from its own hosted models. A tool no longer resolves paths, so the
-    bundle has to be named -- and saying which argument is the difference
-    between a fixable request and a failure inside another tool."""
-    with pytest.raises(ToolInputError, match="landmark_model"):
+def test_fully_automated_cbct_asks_for_landmarks_not_for_weights(tmp_path):
+    """ASO names no bundle. Which weights place the landmarks is the landmark
+    tool's business, and it finds its own from its own data folder -- this used
+    to compose a path into ALI's storage, which meant ASO holding a name for its
+    neighbour's layout and a copy of its weights beside its own references."""
+    sup = FakeSup({}, tmp_path)
+    with pytest.raises(Exception):
+        # Fails later, on the empty input -- what matters is that it got past
+        # the argument check without a bundle.
+        _run_aso(
+            tmp_path, input=str(tmp_path), reference=str(tmp_path),
+            modality="CBCT", automation="Fully-Automated", sup=sup,
+        )
+    for call in getattr(sup, "calls", []):
+        assert "model" not in call.get("params", {}), call
+
+
+def test_a_named_bundle_is_still_passed_on(tmp_path):
+    """An override, not a requirement: a caller pinning a bundle is recording
+    which weights ran, and is obeyed."""
+    sup = FakeSup({}, tmp_path)
+    with pytest.raises(Exception):
         _run_aso(
             tmp_path, input=str(tmp_path), reference=str(tmp_path),
             modality="CBCT", automation="Fully-Automated",
-            sup=FakeSup({}, tmp_path),
+            landmark_model="MyBundle", sup=sup,
         )
+    passed = [c for c in getattr(sup, "calls", []) if "model" in c.get("params", {})]
+    assert not passed or passed[0]["params"]["model"] == "MyBundle"
 
 
 def test_fully_automated_cbct_runs_through_the_supervisor(tmp_path):

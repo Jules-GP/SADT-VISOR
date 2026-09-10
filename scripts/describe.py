@@ -70,6 +70,16 @@ LITERAL_TYPES = (str, int)
 # which is the coupling this repository exists to remove.
 SUPERVISOR = "sup"
 
+# The read-only DATA root, declared and excluded exactly as the supervisor is,
+# and for the same reason: it is not data a client sends. A tool takes it to
+# find ITS OWN model bundle -- `data_root / "ALI" / "models"` -- which is what
+# keeps a caller from having to name its neighbour's weights. The server
+# resolves a hosted-model argument on the way in, but a supervised call never
+# passes that way, so without this the CALLER was composing the path.
+DATA_ROOT = "data_root"
+
+INJECTED = (SUPERVISOR, DATA_ROOT)
+
 # The docstring section that explains the arguments, in the Google style the
 # whole repository already writes. It is the ONLY place that text lives: the
 # client shows it under the field, and a panel without it is a column of
@@ -436,18 +446,18 @@ def is_supervisor(name, parameter, hints):
     a positional `sup` would be filled by the first argument the runner passes.
     Both fail far from here.
     """
-    if name != SUPERVISOR:
+    if name not in INJECTED:
         return False
     if parameter.kind is not parameter.KEYWORD_ONLY:
         raise SchemaError(
             "'{0}' must be keyword-only: write `*, {0}=None`. Anything else can be "
-            "filled positionally by a caller that meant it as data.".format(SUPERVISOR)
+            "filled positionally by a caller that meant it as data.".format(name)
         )
     if name in hints:
         raise SchemaError(
-            "'{0}' must not be annotated. Being unannotated is what marks it as the "
-            "supervisor rather than an argument, and it is duck-typed so a tool never "
-            "imports the server's type.".format(SUPERVISOR)
+            "'{0}' must not be annotated. Being unannotated is what marks it as "
+            "injected by the runner rather than an argument, and it is duck-typed "
+            "so a tool never imports the server's type.".format(name)
         )
     return True
 

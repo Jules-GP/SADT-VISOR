@@ -61,11 +61,6 @@ WORK_DIRNAME = ".aso_work"
 # fifteen minutes into a job.
 LANDMARK_TOOL = "ALI_CBCT"
 
-# The DATA folder that tool's weights live in. Its own name, except where a
-# family shares one: ALI_CBCT and ALI_IOS are two engines behind the ALI
-# facade and share `DATA/ALI/`. Written here rather than derived, because
-# which is which is a deployment fact and a wrong guess is a silent miss.
-LANDMARK_DATA = "ALI"
 
 
 class OrientationRun:
@@ -180,20 +175,6 @@ def orient(
             )
             report["reference"] = os.path.basename(reference_root.rstrip(os.sep))
 
-        # The bundle `ALI_CBCT` predicts with is ALI'S, not a copy of it kept
-        # here. A supervised call never passes through the server's admission
-        # path, so nothing fills a hosted-model argument for it -- the caller
-        # names the bundle, and `sup.datapath` is what lets it. A DATA folder
-        # is named after the tool it belongs to, so a name is enough and no
-        # path is invented.
-        if (modality == catalogs.MODALITY_CBCT
-                and automation == catalogs.AUTOMATION_FULLY
-                and not landmark_model
-                and sup is not None
-                and getattr(sup, "datapath", None)):
-            landmark_model = str(sup.datapath / LANDMARK_DATA / "models")
-            report["landmark_model"] = LANDMARK_DATA
-
         if modality == catalogs.MODALITY_CBCT:
             _run_cbct(
                 input_root=input_root,
@@ -285,13 +266,6 @@ def _check_cbct(
             f"and nothing here can run it: no supervisor was supplied. Send the landmarks "
             f"yourself in 'landmarks' (a folder of .mrk.json files, which is what "
             f"'{LANDMARK_TOOL}' produces), or use Semi-Automated mode."
-        )
-    if not landmark_model:
-        raise ToolInputError(
-            f"Fully-Automated CBCT needs 'landmark_model': the model bundle "
-            f"'{LANDMARK_TOOL}' predicts with. It used to be optional because the server "
-            f"picked a bundle matching the input; a tool no longer resolves paths, so the "
-            f"bundle has to be named."
         )
 
 
@@ -553,13 +527,18 @@ def _predict_landmarks(
     if sup is not None and hasattr(sup, "progress"):
         sup.progress(0.2, f"predicting landmarks with {LANDMARK_TOOL}")
 
+    # Only the landmarks are asked for. Which weights place them is that tool's
+    # business, and it finds its own -- this used to compose a path into ALI's
+    # data folder, which meant ASO holding a name for its neighbour's storage.
+    # `landmark_model` survives as an OVERRIDE: a caller pinning a bundle is
+    # recording which weights ran, and is obeyed.
     produced = sup.run(
         LANDMARK_TOOL,
         input=centered_root,
-        model=landmark_model,
         output_dir=output_dir,
         landmarks=list(requested),
         prediction_ID="Pred",
+        **({"model": landmark_model} if landmark_model else {}),
     )
     # A tool returns a Path, or a dict of named ones. The landmark tool returns
     # its output directory; a dict is accepted so a future one naming its

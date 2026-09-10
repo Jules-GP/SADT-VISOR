@@ -32,6 +32,7 @@ from sadt_ali_common.markups import MARKUPS_EXTENSION
 from sadt_ali_common.markups import write as write_markups
 from . import catalog
 from . import preprocess
+from . import progress
 from .agent import AGENT_FOV, MOVEMENT_COUNT, Agent, NotFound, rng_for
 from .brain import Brain, import_torch, resolve_device
 
@@ -150,12 +151,32 @@ def discover_weights(model_path: str) -> dict:
         )
 
     weights: dict = {}
+    # Where each (landmark, scale) was found. The walk is recursive on purpose --
+    # it is what lets the eight published region archives be unpacked side by
+    # side -- and those contribute DIFFERENT landmarks, so they never collide.
+    # Two whole bundles under one folder do, and the plain assignment below used
+    # to let the second silently overwrite the first, landmark by landmark: the
+    # result was a mixture of two vintages that no report could name. Which model
+    # vintage ran must never be a surprise.
+    seen: dict = {}
     for root, _dirs, files in os.walk(model_path):
         checkpoints = [name for name in sorted(files) if name.endswith(".pth")]
         scale = os.path.basename(root)
         if not checkpoints or scale not in catalog.SCALE_KEYS:
             continue
         label = catalog.canonical(os.path.basename(os.path.dirname(root)))
+        where = os.path.relpath(root, model_path)
+        if (label, scale) in seen:
+            # Relative to the bundle, never absolute: this message reaches the
+            # client verbatim and the server's own paths are not its business.
+            raise ToolInputError(
+                "This model folder holds more than one bundle: '{}' at scale '{}' "
+                "is in both '{}' and '{}'. Point 'model' at one of them -- "
+                "choosing here would leave which weights ran unrecorded.".format(
+                    label, scale, seen[(label, scale)], where
+                )
+            )
+        seen[(label, scale)] = where
         weights.setdefault(label, {})[scale] = os.path.join(root, checkpoints[0])
 
     # A landmark needs a checkpoint at EVERY scale: the agent walks the coarse
@@ -328,8 +349,10 @@ def predict_landmarks(
         scan_reports[key] = record
         scan_started = time.monotonic()
         # Position in the batch, never the scan's name: a file name is patient
-        # metadata and this server does not write it to a log.
+        # metadata and this server does not write it to a log -- and the same
+        # rule is why the progress event carries the counter and nothing else.
         logger.info("scan %d/%d: preprocessing", scan_index, len(scans))
+        progress.report(scan_index, len(scans), "scan")
 
         try:
             _predict_one_scan(
