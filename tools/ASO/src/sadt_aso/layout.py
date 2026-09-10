@@ -22,6 +22,7 @@ from . import catalogs
 _INPUTS = "Inputs"
 _CBCT = "Landmark Reference"
 _IOS = "Teeth & Landmarks"
+_ADVANCED = "Advanced"
 _OUTPUTS = "Outputs"
 
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
@@ -39,10 +40,20 @@ LAYOUT = {
     "reference": {"section": _INPUTS, "label": "Reference"},
     "modality": {"section": _INPUTS, "label": "Input Type"},
     "automation": {"section": _INPUTS, "label": "Mode"},
-    # Landmarks a caller supplies rather than has predicted. Useful in both
-    # modalities, so no condition -- it is the escape hatch that makes
-    # fully-automated work with no landmark tool at all.
-    "landmarks": {"section": _INPUTS, "label": "Landmark folder (optional)"},
+    # Landmarks a caller supplies rather than has predicted: what ALI wrote on
+    # an earlier run, or points placed by hand. Useful in both modalities, so no
+    # condition -- it is the escape hatch that makes fully-automated work with
+    # no landmark tool at all.
+    #
+    # NOT labelled "(optional)": the client already says so for any optional
+    # file argument, and saying it here too printed "Landmark folder (optional)
+    # (optional)". A tool names the thing; whether it is required is the
+    # schema's to say, and the panel's to show.
+    #
+    # In Advanced because of who it is FOR. Someone who already has landmarks
+    # goes looking for it; someone who does not should not have to step over it
+    # on the way to Apply.
+    "landmarks": {"section": _ADVANCED, "label": "Landmark folder"},
 
     # -- CBCT ---------------------------------------------------------------
     "cbct_landmarks": {
