@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from . import progress
 from .pipeline import (
     apply_to_landmarks,
     patient_of,
@@ -87,7 +88,10 @@ def run(
     }
 
     written = []
-    for patient in sorted(subjects):
+    for index, patient in enumerate(sorted(subjects), start=1):
+        # The counter, never the patient key: the key is derived from the
+        # caller's file names, and a progress message is stored and shown.
+        progress.report(index, len(subjects), "patient")
         matrices = by_patient.get(patient)
         if not matrices:
             # Named rather than skipped in silence: upstream dropped a file
@@ -95,7 +99,8 @@ def run(
             # transform 3 of 40 and look complete.
             continue
         entry = {"transforms": [os.path.basename(m) for m in matrices], "outputs": []}
-        for path in subjects[patient]:
+        subject_files = subjects[patient]
+        for file_index, path in enumerate(subject_files, start=1):
             for matrix in matrices:
                 try:
                     written.append(_apply_one(
@@ -104,7 +109,14 @@ def run(
                         output_suffix, entry,
                     ))
                 except Exception as exc:
-                    logger.exception("AutoMatrix failed on %s", os.path.basename(path))
+                    # Both counters, never the file's name: this is a failure
+                    # path, and a failed run's stderr is copied into the
+                    # server's own persistent log. The report below still names
+                    # the file -- it goes back to whoever sent it.
+                    logger.exception(
+                        "AutoMatrix failed on patient %d of %d, file %d of %d",
+                        index, len(subjects), file_index, len(subject_files),
+                    )
                     entry.setdefault("failed", []).append(
                         f"{os.path.basename(path)}: {type(exc).__name__}: {exc}"
                     )

@@ -1,6 +1,7 @@
 """AutoMatrix on synthetic volumes: SimpleITK does the work, for real."""
 
 import json
+import logging
 import os
 import sys
 
@@ -222,3 +223,49 @@ def test_the_refusal_carries_why_nothing_was_written(tmp_path):
     with pytest.raises(ValueError, match="neither an ITK transform"):
         sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
                             output_dir=tmp_path / "out")
+
+
+def test_a_batch_says_which_patient_it_is_on(tmp_path, monkeypatch):
+    """One event per patient -- including one that has no transform.
+
+    The loop reports before it decides whether there is anything to do, which
+    is what keeps the count in the message equal to the count a caller sent.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _volume(tmp_path / "in" / "P1_T1.nii.gz")
+    _volume(tmp_path / "in" / "P2_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_transform.tfm")
+
+    sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                        output_dir=tmp_path / "out")
+
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert [e["message"] for e in events] == ["patient 1 of 2", "patient 2 of 2"]
+    assert [e["fraction"] for e in events] == [0.0, 0.5]
+
+
+def test_a_failure_names_the_position_and_never_the_file(tmp_path, caplog):
+    """Both counters, and never the name the caller gave the file.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log -- so a name
+    written on this path outlives the run and its job directory. The report
+    still names the file under `failed`; that goes back to whoever sent it.
+    """
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "MAMP_0001_T1.nii.gz").write_bytes(b"not a volume at all")
+    _transform(tmp_path / "tfm" / "MAMP_0001_transform.tfm")
+    _volume(tmp_path / "in" / "P2_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P2_transform.tfm")
+
+    with caplog.at_level(logging.INFO, logger="AutoMatrix"):
+        sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                            output_dir=tmp_path / "out")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "AutoMatrix failed on patient 1 of 2, file 1 of 1" in messages, messages
+    assert not any("MAMP_0001" in m for m in messages), messages
+
+    report = json.loads((tmp_path / "out" / "AutoMatrix_report.json").read_text())
+    assert report["patients"]["MAMP_0001"]["failed"], "the report still names it"
