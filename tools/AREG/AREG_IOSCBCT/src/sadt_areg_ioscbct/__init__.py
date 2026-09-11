@@ -55,7 +55,8 @@ def run(
             first, which needs a reference.
         ios_landmarks: Registration mode. Your own intraoral landmarks.
         cbct_landmarks: Registration mode. Your own CBCT landmarks.
-        cbct_reference: Fully-Automated only. The orientation reference.
+        cbct_reference: The frame the CBCT volumes are oriented onto before
+            registering.
         landmark_model: The CBCT landmark bundle, for the modes that predict.
         ios_landmark_model: The intraoral landmark bundle.
         crown_model: The crown-labelling checkpoint, for the modes that label.

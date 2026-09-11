@@ -23,7 +23,7 @@ import numpy as np
 from sadt_areg_common import catalogs
 from sadt_areg_common.errors import ToolInputError
 
-from . import geometry, pipeline, tools
+from . import geometry, pipeline, progress, tools
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +124,16 @@ def _match_landmarks(mesh_path: str, candidates: dict) -> dict:
 
 
 def register(ios_dir: str, cbct_dir: str, ios_landmark_dir: str, cbct_landmark_dir: str,
-             output_dir: str, suffix: str, report: dict, max_dist: float) -> None:
-    """The registration proper, once every landmark exists."""
+             output_dir: str, suffix: str, report: dict, max_dist: float,
+             progress_start: float = 0.0) -> None:
+    """The registration proper, once every landmark exists.
+
+    `progress_start` is where this phase begins on the run's progress bar. It
+    is 0 in the Registration mode, which predicts nothing, and follows the
+    waypoints in `tools.py` in the two modes that do -- otherwise a run that
+    called no other tool would report itself as more than half done before it
+    had registered anything.
+    """
     paired, unpaired = pipeline.discover(ios_dir, cbct_dir)
     report["unpaired"] = unpaired
 
@@ -137,7 +145,11 @@ def register(ios_dir: str, cbct_dir: str, ios_landmark_dir: str, cbct_landmark_d
             f"{len(ios_landmarks)} intraoral and {len(cbct_landmarks)} CBCT."
         )
 
-    for patient, data in paired.items():
+    for index, (patient, data) in enumerate(paired.items(), start=1):
+        # Per patient, not per mesh: the inner loop is one or two arches, and
+        # the counter is what a watcher can act on. The patient key is built
+        # from the caller's file names and never travels in a message.
+        progress.report(index, len(paired), "patient", start=progress_start)
         entry = {"cbct": os.path.basename(data["cbct"]), "meshes": {}}
         for mesh_path in data["ios"]:
             name = os.path.basename(mesh_path)
@@ -243,6 +255,9 @@ def main(ios, cbct, output_dir, automation=None, ios_landmarks=None, cbct_landma
             ios_landmark_dir=ios_lm, cbct_landmark_dir=cbct_lm,
             output_dir=output_dir, suffix=suffix, report=report,
             max_dist=float(max_dist) if max_dist else geometry.DEFAULT_MAX_DIST,
+            # The last waypoint `tools.py` writes is 0.5; the registration has
+            # the rest. Registration mode wrote none of them and starts at 0.
+            progress_start=0.0 if automation == catalogs.AUTOMATION_REGISTRATION else 0.6,
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

@@ -58,12 +58,13 @@ def run(
             first, which needs a reference.
         regions: The anatomy to register on -- what has NOT changed between the
             timepoints. The one argument a clinician must actually think about.
-        t1_masks: Semi-Automated only. Your own T1 segmentation masks.
+        t1_masks: Your own T1 segmentation masks, instead of having them
+            segmented for you.
         segmentation_model: The mask model bundle, for the modes that segment.
         segmentation_label: Which label value in the masks to register on.
-        reference: Oriented + Fully-Automated only. The orientation reference.
-        landmark_model: Oriented + Fully-Automated only. The landmark bundle the
-            orientation step predicts with.
+        reference: The frame the scans are oriented onto before registering.
+        landmark_model: The landmark bundle that orientation step predicts
+            with.
         dicom_input: The inputs are DICOM series rather than volumes.
         output_suffix: Added to each output name, e.g. `scan_Reg.nii.gz`.
 

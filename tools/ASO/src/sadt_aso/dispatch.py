@@ -629,9 +629,43 @@ def _run_cbct(
     # repository checkout -- see README.md.
     supplied = _as_directory(landmarks_path, os.path.join(work_dir, "landmarks_in")) \
         if landmarks_path else None
-    fully = automation == catalogs.AUTOMATION_FULLY and supplied is None
+    by_patient = _collect(supplied) if supplied else None
+
+    # Decided PER PATIENT, from what each one came with. A landmark file beside
+    # a scan, or in the folder the caller supplied, is landmarks to register on;
+    # a scan with none is one to predict for. The caller used to say which, and
+    # saying it wrong was silent -- a fully-automated run over landmarks already
+    # on disk predicted them again, and a semi-automated one over scans with
+    # none failed patient by patient with "no landmarks".
+    #
+    # `automation` survives as an OVERRIDE: writing Fully-Automated when
+    # landmarks exist is asking for them to be ignored, which is a legitimate
+    # thing to want and is now the only thing this argument does.
+    forced = automation == catalogs.AUTOMATION_FULLY
+
+    def _needs_prediction(key):
+        # A folder the caller SUPPLIED wins over everything, including the mode.
+        # That precedence is what lets this tool run standalone -- predict the
+        # landmarks yourself, pass the folder, no supervisor needed -- and
+        # reversing it would make `Fully-Automated` throw away points a caller
+        # went out of their way to hand over.
+        if by_patient is not None:
+            return not by_patient.get(key)
+        if forced:
+            return True
+        return not patients[key]["markups"]
+
+    # Only where predicting is POSSIBLE. With no supervisor there is no landmark
+    # tool to ask, and a patient with no landmarks then fails on its own terms --
+    # "no landmarks for this patient", which is true and actionable -- instead of
+    # taking the batch down inside a call that was never going to work.
+    to_predict = ({key for key in patients if _needs_prediction(key)}
+                  if sup is not None else set())
+    fully = bool(to_predict)
     report["landmark_source"] = (
-        LANDMARK_TOOL if fully else ("supplied" if supplied else "alongside the scans")
+        LANDMARK_TOOL if len(to_predict) == len(patients)
+        else ("supplied" if supplied else "alongside the scans") if not to_predict
+        else "mixed"
     )
 
     # Landmark files that matched no scan. Collected even on a run that
@@ -673,7 +707,7 @@ def _run_cbct(
                 centered_root,
                 f"{key}{cbct_pipeline.compressed_extension(extension)}",
             )
-            if fully
+            if key in to_predict
             else None
         )
         try:
@@ -682,7 +716,9 @@ def _run_cbct(
             report["patients"][key] = {"status": "failed", "reason": str(exc)}
             continue
         prepared[key] = {
-            "image": None if fully else image,  # kept in RAM only when it is used next
+            # Kept in RAM only when it is used next -- a predicted patient's
+            # scan is read from disk by the landmark tool instead.
+            "image": None if key in to_predict else image,
             "translation": translation,
             "extension": extension,
             "centered_path": destination,
@@ -692,24 +728,27 @@ def _run_cbct(
     # Phase 2 -- landmarks, either the caller's (moved into the centred space)
     # or predicted ones (already in it, because the tool ran on the centred
     # scans).
-    if fully:
-        predictions = _predict_landmarks(
-            centered_root, landmark_model, requested, work_dir, sup
-        )
-        for key, entry in prepared.items():
+    # ONE call for every scan that needs predicting, not one per patient: the
+    # landmark tool loads its agents once and walks a folder, so a cohort costs
+    # what a cohort costs rather than N times a single scan.
+    predictions = (
+        _predict_landmarks(centered_root, landmark_model, requested, work_dir, sup)
+        if to_predict else {}
+    )
+    for key, entry in prepared.items():
+        if key in to_predict:
+            # Already in the centred space: the tool ran on the centred scans.
             entry["landmarks"] = predictions.get(key, {})
-    else:
-        # Merged per patient, then moved into the centred space -- the landmarks
-        # describe the ORIGINAL volume, wherever they came from, and the
-        # registration compares them against a centred one.
-        by_patient = _collect(supplied) if supplied else None
-        for key, entry in prepared.items():
-            found = (
-                by_patient.get(key, {})
-                if by_patient is not None
-                else cbct_pipeline.load_landmarks(patients[key]["markups"])
-            )
-            entry["landmarks"] = cbct_pipeline.center_landmarks(found, entry["translation"])
+            continue
+        # The caller's, moved into the centred space -- they describe the
+        # ORIGINAL volume, wherever they came from, and the registration
+        # compares them against a centred one.
+        found = (
+            by_patient.get(key, {})
+            if by_patient is not None
+            else cbct_pipeline.load_landmarks(patients[key]["markups"])
+        )
+        entry["landmarks"] = cbct_pipeline.center_landmarks(found, entry["translation"])
 
     # Phase 3 -- register and write. It starts where the landmark tool left
     # off, which is only where semi-automated ends its own phase 1: there is no
@@ -759,8 +798,9 @@ def _run_ios(
     input_root, reference_root, automation, teeth, landmark_types, jaws, occlusion,
     output_dir, suffix, max_triplets, seed, report,
 ) -> None:
-    fully = automation == catalogs.AUTOMATION_FULLY
-    reference = ios_pipeline.load_reference(reference_root, need_surfaces=fully)
+    # Which form each jaw needs is decided per jaw now, so the reference is
+    # loaded with both and each branch says what it is missing.
+    reference = ios_pipeline.load_reference(reference_root)
 
     patients = ios_pipeline.discover(input_root, suffix)
     patients = {key: entry for key, entry in patients.items() if _has_surface(entry)}
@@ -772,8 +812,10 @@ def _run_ios(
         )
 
     report["requested_teeth"] = list(teeth)
-    if not fully:
-        report["requested_landmark_types"] = list(landmark_types)
+    # Both are reported: which one a jaw used is decided per jaw, so a cohort
+    # can legitimately have registered some on landmarks and some on centroids,
+    # and a reader has to be able to see what was asked for either way.
+    report["requested_landmark_types"] = list(landmark_types)
 
     selected_teeth = catalogs.split_by_jaw(teeth)
     landmark_keys = catalogs.landmark_keys_by_jaw(teeth, landmark_types)
@@ -796,8 +838,10 @@ def _run_ios(
             seed=seed,
         )
 
-    if fully:
-        _reject_if_nothing_was_labelled(report["patients"])
+    # Unconditional now. It only fires when EVERY jaw failed for want of tooth
+    # labels, which can only happen on the centroid path -- there is no mode to
+    # test for any more.
+    _reject_if_nothing_was_labelled(report["patients"])
 
 
 def _has_surface(entry: dict) -> bool:
@@ -813,8 +857,8 @@ def _reject_if_nothing_was_labelled(patients: dict) -> None:
     """Turn "not one of your meshes is segmented" into an input error.
 
     The distinction matters, and only these two cases are treated differently.
-    No labelled mesh at all means the caller chose the wrong mode, and saying so
-    is more use than an empty output folder. Some meshes labelled and others not
+    No labelled mesh at all is a cohort that cannot be oriented at all, and
+    saying so is more use than an empty output folder. Some meshes labelled and others not
     is a data problem: those are recorded per patient and the rest of the batch
     is kept, because "one of your forty meshes was bad" is not a reason to
     return nothing.
@@ -831,10 +875,11 @@ def _reject_if_nothing_was_labelled(patients: dict) -> None:
     if not reasons or not all(_UNLABELLED in reason for reason in reasons):
         return
     raise ToolInputError(
-        "Fully-Automated IOS orients a mesh by its tooth labels, and none of the "
-        "meshes sent carries a per-point array named one of "
-        f"{', '.join(ios_pipeline.markups.LABEL_ARRAY_NAMES)}. Run 'Crown_Seg' over "
-        "them first, or use Semi-Automated mode with landmark files."
+        "None of these meshes carries landmarks, so each was oriented by its "
+        "tooth centroids -- and none carries a per-point label array named one "
+        f"of {', '.join(ios_pipeline.markups.LABEL_ARRAY_NAMES)} either, so there "
+        "are no centroids to take. Run 'Crown_Seg' over them first, or put a "
+        "landmark file beside each mesh."
     )
 
 

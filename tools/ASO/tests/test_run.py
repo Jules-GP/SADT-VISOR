@@ -1741,3 +1741,37 @@ def test_the_models_folder_is_not_mistaken_for_a_bundle():
     # ALI's landmark weights live in the same folder and are not a reference.
     assert not dispatch._is_reference_bundle(os.path.join(models, "CBCT_landmark_models"))
 
+
+
+def test_a_cohort_with_some_landmarks_and_some_without_does_both(tmp_path):
+    """The reason the mode became a derivation. One folder, two kinds of
+    patient: the one carrying landmarks registers on them, the one without is
+    predicted. Declared as a single mode, half the cohort was always wrong."""
+    root = tmp_path / "input"
+    _write_scan(root / "has_lm_scan.nii.gz")
+    _write_markups(str(root / "has_lm_lm.mrk.json"), _REFERENCE_POINTS)
+    _write_scan(root / "no_lm_scan.nii.gz")
+
+    sup = FakeSup({}, tmp_path)
+    try:
+        _run_aso(tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+                 modality="CBCT", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup)
+    except Exception:
+        pass
+    # The landmark tool was asked about the cohort, not about nobody and not
+    # about the patient that already had points.
+    assert getattr(sup, "calls", []), "the scan without landmarks was not predicted"
+
+
+def test_a_patient_with_landmarks_is_never_predicted_for(tmp_path):
+    """Re-predicting over points a clinician placed, or a previous run wrote,
+    is the surprise this removes."""
+    root = tmp_path / "input"
+    _write_scan(root / "p1_scan.nii.gz")
+    _write_markups(str(root / "p1_lm.mrk.json"), _REFERENCE_POINTS)
+
+    sup = FakeSup({}, tmp_path)
+    _run_aso(tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+             modality="CBCT", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup)
+
+    assert not getattr(sup, "calls", []), "landmarks already on disk were predicted again"

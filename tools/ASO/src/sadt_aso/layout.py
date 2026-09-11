@@ -45,7 +45,13 @@ LAYOUT = {
     # a caller uses a reference of their own.
     "reference": {"section": _INPUTS, "label": "Reference", "hidden": True},
     "modality": {"section": _INPUTS, "label": "Input Type"},
-    "automation": {"section": _INPUTS, "label": "Mode"},
+    # Derived from the data, per patient and per jaw: landmarks beside a scan
+    # are landmarks to register on, a scan with none is one to predict or to
+    # take centroids from. Asking the clinician to declare it meant the answer
+    # could disagree with the folder -- and when it did, the folder won, in
+    # silence. Still an argument, as the one override it can still express:
+    # "ignore the landmarks that are there and predict anyway".
+    "automation": {"section": _INPUTS, "label": "Mode", "hidden": True},
     # Landmarks a caller supplies rather than has predicted: what ALI wrote on
     # an earlier run, or points placed by hand. Useful in both modalities, so no
     # condition -- it is the escape hatch that makes fully-automated work with
