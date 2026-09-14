@@ -230,6 +230,10 @@ def run(scans: Path, reference: Path, output_dir: Path, *, sup=None) -> Path:
   grows without repeating; the deepest real one is `AREG → ASO → ALI_CBCT`.
 - Five members, nothing more: `sup.run(tool, **params)`, `sup.out`, `sup.tmp`,
   `sup.progress(fraction, message)`, `sup.log(message)`.
+- **`sup.progress` is not a reason to take a supervisor.** It is one of the
+  five members and it still works -- it writes to the same place a tool's own
+  `progress.py` does -- but reporting progress needs no supervisor at all. See
+  "Report where a batch has got to" below.
 - `sup.run("ALI", ...)`, never `sup.ALI(...)`. A typo in a string is greppable;
   a typo in an attribute is an `AttributeError` fifteen minutes into a job, and
   the call graph stops being inspectable.
@@ -240,6 +244,55 @@ def run(scans: Path, reference: Path, output_dir: Path, *, sup=None) -> Path:
 
 Reach for this only when the ordering genuinely forbids chaining. Two calls with
 a folder in between is simpler for everyone, and the server already does it.
+
+### Report where a batch has got to
+
+A forty-scan run takes an hour and the client shows an elapsed timer, which
+says only that the connection is still open. A tool tells it where it has got
+to by appending one JSON object per line to the file the server names in
+`SADT_PROGRESS_FILE`:
+
+```json
+{"fraction": 0.325, "message": "scan 14 of 40"}
+```
+
+The server stamps the sequence number, the time and the state itself, and a
+supervised child INHERITS the variable -- so a chain's events land in one file,
+already ordered, with no plumbing.
+
+Copy `progress.py` from `tools/_template/src/sadt_template/` into your package,
+the way `iter_scans` is copied rather than shared, and call it at the top of
+the cohort loop:
+
+```python
+from . import progress
+
+for index, scan in enumerate(found, start=1):
+    progress.report(index, len(found), "scan")
+```
+
+- `progress.report(index, total, what)` is the whole API for a batch. `index`
+  is 1-based and names the item ABOUT to be processed, so the fraction is the
+  share already behind it and never claims an item that is still running.
+  `start=` and `end=` bound the slice of the run a loop occupies, for a tool
+  whose batch is one phase among several -- without them the second phase
+  sends the bar back to zero.
+- `progress.emit(fraction, message)` is the raw form, for a waypoint that is
+  not a position in a batch.
+- **Never a file name, a patient name or an argument value in a message.**
+  Position in the batch is progress; a file name is patient metadata, and
+  these messages are stored on the server and shown to whoever is watching.
+- **Best effort, and stdlib only.** Every failure to write is swallowed: a
+  tool that cannot report its progress still has to finish the run. With the
+  variable unset -- a checkout, a test, an older server -- it does nothing at
+  all, which is why no tool needs a fallback path.
+- **Report what is true.** `fraction` may be `None`, and that is the right
+  answer for a phase the tool cannot see inside: `Batch_Dental_Seg` hands its
+  whole cohort to one nnUNet call and can only say when the reading ends and
+  the writing starts, while `AMASSS` loops per STRUCTURE and says "structure 3
+  of 5". Interpolating a number a tool cannot know is worse than no bar.
+- `run_tool.py` sets the variable itself and echoes what a tool appends, so
+  running a tool from a checkout exercises the same channel the server uses.
 
 Check the result before going further:
 
@@ -608,7 +661,7 @@ server keeps working off its copy until this one is proven.
 ## Repository checks
 
 ```bash
-uv run --no-project --python 3.12 --with pytest -- pytest scripts/tests -q
+uv run --no-project --python 3.12 --with pytest --with numpy -- pytest scripts/tests -q
 uv run scripts/audit.py
 uv run --no-project --python 3.11 --with pyflakes -- python -m pyflakes tools/*/src tools/*/*/src
 ```
