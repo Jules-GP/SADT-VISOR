@@ -220,6 +220,7 @@ def segment(
     prediction_ID: str = "Seg",
     device: str = "cuda",
     tile_step_size: float = 0.5,
+    gpu_resampling: bool = True,
 ) -> dict:
     """Segment every scan under `input_path` with one model bundle.
 
@@ -297,7 +298,8 @@ def segment(
     progress.emit(0.1, f"segmenting {len(cases)} scan(s) in one pass")
     try:
         nnunet_runner.predict_folder(
-            model_folder, nnunet_input, nnunet_output, device, tile_step_size=tile_step_size
+            model_folder, nnunet_input, nnunet_output, device,
+            tile_step_size=tile_step_size, gpu_resampling=gpu_resampling,
         )
     except Exception:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -357,6 +359,11 @@ def segment(
         "device": device,
         "prediction_ID": prediction_ID,
         "separate_segments": separate_segments,
+        # Recorded because it is lossy by default: the input resampling runs at
+        # spline order 1 rather than 3, so a result produced this way is not
+        # bit-identical to one produced with it off. Whoever reads a
+        # segmentation must be able to see which pipeline made it.
+        "gpu_resampling": bool(gpu_resampling) and device.startswith("cuda"),
         "tile_step_size": float(tile_step_size),
         "scans": report_scans,
         "summary": f"{len(succeeded)}/{len(report_scans)} scan(s) segmented",

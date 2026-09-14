@@ -52,7 +52,12 @@ torchvision = { index = "pytorch-cu128" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Deselected by DEFAULT, not merely skipped: a plain `pytest` must not depend
+# on a card or on a 176 MB file being staged, and a suite whose green line is
+# half skips says nothing. Run them by hand with `-m models -o addopts=` and
+# report the result in the PR.
+addopts = "-m 'not gpu and not models'"
 markers = [
-    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
-    "models: needs DATA/CLIC/models/final_model.pth.",
+    "gpu: needs a CUDA device. Deselected by default; run it by hand and report the result in the PR.",
+    "models: needs DATA/CLIC/models/final_model.pth, named by SADT_CLIC_MODEL. Deselected by default.",
 ]

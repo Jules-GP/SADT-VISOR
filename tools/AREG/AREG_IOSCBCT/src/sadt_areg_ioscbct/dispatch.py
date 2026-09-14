@@ -68,19 +68,54 @@ def _write_surface(surface, points, path: str) -> None:
 
 
 def _landmarks_by_jaw(directory: str) -> dict:
-    """`{jaw hint: {label: position}}` for every landmark file in a folder."""
+    """`{relative path: {label: position}}` for every landmark file in a folder.
+
+    Keyed by the path relative to the folder, not by the base name: ALI writes
+    one file per scan and MIRRORS the input's tree, so two sites' `P1_U_lm_
+    Pred.mrk.json` are two files. Keyed by base name the second silently
+    replaced the first, which then made `len(candidates) == 1` -- the "one file
+    covers every jaw" fallback -- fire on a folder that held two.
+    """
     found = {}
     if not directory or not os.path.isdir(directory):
         return found
-    for root, _dirs, files in os.walk(directory):
+    for root, directories, files in os.walk(directory):
+        directories.sort()
         for name in sorted(files):
-            if not name.lower().endswith(".json"):
+            if not name.lower().endswith(pipeline.LANDMARK_EXTENSIONS):
                 continue
             path = os.path.join(root, name)
             points = pipeline.read_landmarks(path)
             if points:
-                found[name] = points
+                found[os.path.relpath(path, directory)] = points
     return found
+
+
+def _for_patient(candidates: dict, patient: str, sole_patient: bool) -> dict:
+    """The landmark files that belong to one patient.
+
+    Matching on the jaw token ALONE is what made a two-patient batch register
+    the second patient's mesh against the FIRST patient's landmarks: every
+    ALI_IOS file carries a `_U` or `_L` token, `sorted()` puts `P1...` before
+    `P2...`, and the first jaw match won. Nothing about the result looks wrong
+    -- a rigid transform is produced, the mesh is written, the report says
+    "ok" -- so the whole batch after patient one is quietly registered onto the
+    wrong anatomy.
+
+    A batch holding ONE patient keeps the looser rule. There the two sides
+    cannot be confused, and a landmark file named by a convention
+    `patient_key` cannot read -- one with no digits in it at all, which is what
+    the published reference files look like -- would otherwise stop matching
+    anything at all.
+    """
+    own = {
+        name: points
+        for name, points in candidates.items()
+        if pipeline.patient_key(os.path.basename(name)) == patient
+    }
+    if own:
+        return own
+    return candidates if sole_patient else {}
 
 
 _JAW_TOKENS = {"u", "upper", "l", "lower"}
@@ -109,12 +144,12 @@ def _match_landmarks(mesh_path: str, candidates: dict) -> dict:
 
     mesh_tokens = set(pairing.tokens(os.path.basename(mesh_path)))
     for name, points in sorted(candidates.items()):
-        if mesh_tokens & set(pairing.tokens(name)) & _JAW_TOKENS:
+        if mesh_tokens & set(pairing.tokens(os.path.basename(name))) & _JAW_TOKENS:
             return points
 
     unlabelled = [
         points for name, points in sorted(candidates.items())
-        if not (set(pairing.tokens(name)) & _JAW_TOKENS)
+        if not (set(pairing.tokens(os.path.basename(name))) & _JAW_TOKENS)
     ]
     if len(unlabelled) == 1:
         return unlabelled[0]
@@ -145,21 +180,25 @@ def register(ios_dir: str, cbct_dir: str, ios_landmark_dir: str, cbct_landmark_d
             f"{len(ios_landmarks)} intraoral and {len(cbct_landmarks)} CBCT."
         )
 
+    sole_patient = len(paired) == 1
     for index, (patient, data) in enumerate(paired.items(), start=1):
         # Per patient, not per mesh: the inner loop is one or two arches, and
         # the counter is what a watcher can act on. The patient key is built
         # from the caller's file names and never travels in a message.
         progress.report(index, len(paired), "patient", start=progress_start)
         entry = {"cbct": os.path.basename(data["cbct"]), "meshes": {}}
+        # Narrowed to this patient BEFORE the jaw is looked at: see _for_patient.
+        own_ios = _for_patient(ios_landmarks, patient, sole_patient)
+        own_cbct = _for_patient(cbct_landmarks, patient, sole_patient)
         for mesh_path in data["ios"]:
             name = os.path.basename(mesh_path)
             try:
-                moving = _match_landmarks(mesh_path, ios_landmarks)
-                fixed = _match_landmarks(mesh_path, cbct_landmarks)
+                moving = _match_landmarks(mesh_path, own_ios)
+                fixed = _match_landmarks(mesh_path, own_cbct)
                 if not moving or not fixed:
                     raise ToolInputError(
-                        "No landmark file matches this mesh's jaw on "
-                        f"{'the intraoral' if not moving else 'the CBCT'} side."
+                        f"No landmark file matches patient '{patient}' and this mesh's "
+                        f"jaw on {'the intraoral' if not moving else 'the CBCT'} side."
                     )
                 surface, points = _surface_points(mesh_path)
                 matrix, detail = pipeline.register_one(
@@ -169,7 +208,10 @@ def register(ios_dir: str, cbct_dir: str, ios_landmark_dir: str, cbct_landmark_d
                     output_dir, patient, f"{os.path.splitext(name)[0]}_{suffix}.vtk"
                 )
                 _write_surface(surface, geometry.apply(points, matrix), destination)
-                np.save(destination.replace(".vtk", "_matrix.npy"), matrix)
+                # splitext, not `destination.replace(".vtk", ...)`: str.replace
+                # rewrites EVERY occurrence, so a mesh whose own stem carries
+                # `.vtk` produced a mangled matrix name beside a correct mesh.
+                np.save(os.path.splitext(destination)[0] + "_matrix.npy", matrix)
                 entry["meshes"][name] = dict(
                     detail, status="ok", output=os.path.relpath(destination, output_dir)
                 )

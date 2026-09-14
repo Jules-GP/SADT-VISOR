@@ -13,6 +13,7 @@ the only difference, and it is a parameter.
 
 import logging
 import os
+import re
 
 import numpy as np
 import SimpleITK as sitk
@@ -34,6 +35,54 @@ PATIENT_SUFFIXES = (
     "_lm_Pred", "_Scanreg", "_MERGED", "_scan", "_Scan", "_Or", "_OR", "_lm",
 )
 
+# One separator character, for asking whether a suffix match ends where a token
+# ends. The same four the sibling engines split names on -- `ios/pipeline.py`'s
+# `_SPLIT` and the shared `sadt_areg_common.pairing` both use `_ - .`, and
+# whitespace is added because a name a clinician typed can contain it and a
+# space closes a word as plainly as an underscore does.
+_SEPARATOR = re.compile(r"[_\-.\s]")
+
+
+def _token_aligned_index(stem: str, suffix: str) -> int:
+    """Where `suffix` occurs in `stem` as WHOLE tokens, or -1.
+
+    `str.find` alone was the defect this exists to remove. Every entry of
+    `PATIENT_SUFFIXES` opens on an underscore, so a raw `find` is already
+    anchored on its left -- and anchored nowhere on its right, which is what
+    let `_OR` match inside `_ORTHO`, `_Scan` inside `_Scanner`, and `_lm`
+    inside `_lmk`:
+
+        SMITH_ORTHO_Scan.nii.gz  ->  SMITH
+        SMITH_ORLANDO_Scan.nii.gz -> SMITH
+
+    Two subjects whose names differ only after the false match collapse into
+    one key, and `discover` then keeps one scan and gives it both landmark
+    sets -- silently, in a run that reports success.
+
+    A match therefore has to end on a token boundary: the end of the stem, or a
+    separator. The left side is checked rather than assumed, so an entry added
+    to the table without a leading separator would still be matched as a token
+    and not as a substring.
+
+    The same rule, and the same helper, as the shared
+    `sadt_areg_common.pairing._token_aligned_index`, where it was fixed first.
+    Copied rather than imported: ASO does not depend on that package today and
+    adding the dependency is a bigger decision than this fix.
+    """
+    start = stem.find(suffix)
+    while start >= 0:
+        end = start + len(suffix)
+        opens_on_a_boundary = (
+            start == 0
+            or bool(_SEPARATOR.match(suffix[0]))
+            or bool(_SEPARATOR.match(stem[start - 1]))
+        )
+        closes_on_a_boundary = end == len(stem) or bool(_SEPARATOR.match(stem[end]))
+        if opens_on_a_boundary and closes_on_a_boundary:
+            return start
+        start = stem.find(suffix, start + 1)
+    return -1
+
 
 def patient_stem(filename: str) -> str:
     """The patient a file belongs to, from its name alone.
@@ -41,6 +90,12 @@ def patient_stem(filename: str) -> str:
     Only ever compared against other files in the SAME directory (see
     `discover`), so two patients whose names collapse to the same stem in
     different folders stay separate.
+
+    A suffix is truncated, not deleted: everything it introduces goes with it,
+    so `P1_Scan_reoriented.nii.gz` keys to `P1` and not to `P1_reoriented`. It
+    has to match on token boundaries -- see `_token_aligned_index` -- and a
+    stem that BEGINS with one is left alone, because there is no patient in
+    front of it to keep.
     """
     stem = filename
     for extension in SCAN_EXTENSIONS:
@@ -56,7 +111,7 @@ def patient_stem(filename: str) -> str:
             stem = os.path.splitext(stem)[0]
 
     for suffix in PATIENT_SUFFIXES:
-        index = stem.find(suffix)
+        index = _token_aligned_index(stem, suffix)
         if index > 0:
             stem = stem[:index]
     return stem

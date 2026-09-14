@@ -18,6 +18,7 @@ def run(
     prediction_ID: str = "Seg",
     device: Literal["cuda", "cpu"] = "cuda",
     tile_step_size: float = 0.5,
+    gpu_resampling: bool = True,
 ) -> Path:
     """Segment teeth and jaw structures on a dental CT or CBCT scan.
 
@@ -46,6 +47,26 @@ def run(
         tile_step_size: nnUNet's sliding-window overlap; the window advances by
             patch_size times this. It DOES move the segmentation, so it is left
             at nnUNet's own default.
+        gpu_resampling: Resample on the GPU instead of nnUNet's scipy splines.
+            Resampling, not the network, is where a run goes: measured per
+            bundle on a 512x512x365 CBCT at 0.33 mm, it is 1.5x (Naso), 3.0x
+            (DentalSegmentator, Pediatric) and 4.8x (UniversalLab, 279 s down
+            to 58 s) end to end. Ignored on CPU and for a bundle whose plans
+            pin a non-default resampler.
+
+            It is lossy, which is why it is an argument: the input resampling
+            drops from spline order 3 to order 1 (torch has no 3D cubic
+            interpolation). Against the scipy pipeline on the same scan the
+            worst label of each bundle measured Dice 0.991 (DentalSegmentator,
+            Naso), 0.993 (Pediatric) and 0.993 (UniversalLab) -- a sub-voxel
+            boundary shift, and better than the 0.978 AMASSS accepted for the
+            same change. Set false for bit-identical nnUNet output.
+
+            One caution, and it is about memory rather than accuracy:
+            UniversalLab has 55 output classes, and resampling all of them on
+            the card takes its peak from 15.5 GiB to 37.1 GiB. On a card
+            smaller than about 40 GiB, pass false for THAT bundle. See README,
+            "GPU resampling". Recorded in the run report either way.
 
     Returns:
         The output directory, holding the segmentations and the run report. The
@@ -64,5 +85,6 @@ def run(
         prediction_ID=prediction_ID,
         device=device,
         tile_step_size=tile_step_size,
+        gpu_resampling=gpu_resampling,
     )
     return output_dir

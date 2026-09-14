@@ -827,6 +827,12 @@ def _run_ios(
     landmark_keys = catalogs.landmark_keys_by_jaw(teeth, landmark_types)
     driving = catalogs.DRIVING_JAW[occlusion]
 
+    # One cache for the whole cohort: the reference bundle is the same two
+    # files for every patient, and it was being parsed once per jaw per
+    # patient. A patient's own meshes are dropped when that patient is done,
+    # inside orient_patient's own `finally`.
+    cache = ios_pipeline.FileCache()
+
     for index, (key, entry) in enumerate(sorted(patients.items()), start=1):
         progress.report(index, len(patients), "orienting patient")
         report["patients"][key] = ios_pipeline.orient_patient(
@@ -842,6 +848,7 @@ def _run_ios(
             suffix=suffix,
             max_triplets=max_triplets,
             seed=seed,
+            cache=cache,
         )
 
     # Unconditional now. It only fires when EVERY jaw failed for want of tooth

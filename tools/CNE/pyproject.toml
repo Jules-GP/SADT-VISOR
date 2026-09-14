@@ -1,0 +1,78 @@
+[project]
+name = "sadt-cne"
+version = "0.1.0"
+description = "Extract structured key-value findings from free-text clinical notes with a local quantised LLM."
+# The deployment image's interpreter (lab-ai:2026.08, python 3.11.13).
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # The inference engine, from the CUDA 12.4 wheel index below. Upstream
+    # installs the CPU wheel (CNE/CNE.py:62) and is right to: it runs inside
+    # Slicer on a clinician's laptop. This is a server with a 48 GB card, and a
+    # 7B model at q4_k_m is 4.4 GB of weights -- measured at 9.6x faster per
+    # note on this card, and the answers are identical (see README).
+    "llama-cpp-python==0.3.35",
+    # What that wheel LINKS and does not SHIP. auditwheel excludes the CUDA
+    # runtime by policy, so `import llama_cpp` dies on `libcudart.so.12:
+    # cannot open shared object file` in the deployment image, which is
+    # `python:3.13-slim` and carries no CUDA at all. Opened by
+    # `dependencies.preload_cuda_runtime()` before the import.
+    #
+    # The versions are AMASSS's and Batch_Dental_Seg's to the digit, not the
+    # 12.4 that matches the wheel's build: CUDA 12 is minor-version compatible
+    # in this direction, and identical files are what the image hardlinks
+    # instead of storing a second 600 MB copy of cuBLAS per tool.
+    "nvidia-cuda-runtime-cu12==12.8.90",
+    "nvidia-cublas-cu12==12.8.4.1",
+    # Reading the notes. Neither is heavy and neither is optional in practice,
+    # but both are imported only when a note of that format is actually read:
+    # a batch of .txt must not fail because a PDF reader is absent.
+    "pymupdf==1.28.2",
+    "python-docx==1.2.0",
+]
+
+# What makes this directory a tool. `name` is the API identity: what a client
+# sends, what deployment.toml is keyed by, and what `sup.run()` names.
+[tool.sadt]
+tool = true
+name = "CNE"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_cne"]
+
+# `explicit` is load-bearing: without it uv looks for EVERY package on this
+# index, and none of the others are there. It is also what makes this a PINNED
+# SOURCE rather than an extra index -- as an extra index uv is free to mix
+# registries, and the same version number exists on PyPI as an sdist that
+# compiles llama.cpp from source at install time.
+#
+# cu124 rather than the cu128 the torch tools use: cu126 and cu128 are 404 on
+# this index, cu124 and cu125 are the newest that exist, and the driver here
+# (595.84, CUDA 13.2) is far newer than either. The build is what fixes the
+# CUDA the wheel was compiled against; the runtime pinned above is separate and
+# may be newer.
+[[tool.uv.index]]
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+sadt-testkit = { path = "../../testkit", editable = true }
+llama-cpp-python = { index = "llama-cpp-cpu" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Deselected by DEFAULT, not merely skipped: a plain `pytest` must not depend on
+# a 4.4 GB GGUF being staged, and a suite whose green line is half skips says
+# nothing. Run them by hand with `-m models -o addopts=` and report the result.
+addopts = "-m 'not gpu and not models'"
+markers = [
+    "models: needs a real .gguf under DATA/CNE/models/. Skipped by default; run it by hand and report the result in the PR.",
+    "gpu: needs a CUDA device AND a CUDA llama-cpp-python build. Skipped in CI (`-m 'not gpu'`).",
+]

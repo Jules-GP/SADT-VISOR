@@ -1,0 +1,56 @@
+[project]
+name = "sadt-agent"
+version = "0.1.0"
+description = "Route a free-text request to one of this server's tools with a local LLM."
+# The deployment image's interpreter (lab-ai:2026.08, python 3.11.13). Nothing
+# here constrains it further -- there is nothing to constrain.
+requires-python = ">=3.11,<3.12"
+# Empty, and that is the result of a measurement rather than an omission.
+#
+# Upstream needed three: `pyyaml` to read the hand-written manifest this port
+# replaced with the live registry; `ollama` for two HTTP POSTs, which the
+# standard library makes; and `sentence-transformers` -- with ~1.2 GB of CPU
+# torch wheels behind it, 7 GB at cu128 -- to rank a request against 23 short
+# strings. All three were measured against what replaced them; the ranker
+# comparison is in README.md, with the numbers.
+dependencies = []
+
+# What makes this directory a tool. A directory holding a pyproject.toml
+# WITHOUT this section -- a shared path dependency, the testkit -- is a plain
+# package: importable, installable, never discovered or served.
+#
+# `name` is the API identity: what a client sends, what deployment.toml is keyed
+# by, and what another tool passes to `sup.run()`.
+[tool.sadt]
+tool = true
+name = "Agent"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_agent"]
+
+[tool.uv.sources]
+# Development only: lets this tool's tests run ANOTHER tool through that tool's
+# own venv, as a subprocess, the way the server does. It has no dependencies of
+# its own, so it cannot perturb the resolution above -- which here means it
+# cannot turn an empty dependency set into a non-empty one. Never move it into
+# [project] dependencies -- see testkit/README.md.
+sadt-testkit = { path = "../../testkit", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Deselected by DEFAULT, not merely skipped: a plain `pytest` must not depend on
+# an Ollama server being up with a 5 GB model pulled, and a suite whose green
+# line is half skips says nothing. Run them by hand with `-m models -o addopts=`
+# and report the result in the PR.
+addopts = "-m 'not gpu and not models'"
+markers = [
+    "models: needs a reachable Ollama endpoint with the model pulled. Deselected by default; run it by hand and report the result in the PR.",
+    "gpu: needs a CUDA device. Deselected by default. Nothing here uses one; the marker exists so the repository-wide `-m 'not gpu'` means the same thing everywhere.",
+]

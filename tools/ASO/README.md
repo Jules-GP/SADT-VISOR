@@ -206,7 +206,7 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
   `ios_teeth` (32), `ios_landmark_types` (8), `ios_jaws` (2), `ios_occlusion`
   (3), `modality` (2) and `automation` (2). `sup` is absent from `arguments`, as
   it must be. Asserted out of process against the real venv.
-- **Tests**: 81 passing, 1 GPU test deselected. Six of them run the tool **out of
+- **Tests**: 193 passing, 1 GPU test deselected. Six of them run the tool **out of
   process, in its own venv**, the way the server does -- including a complete
   semi-automated CBCT registration on synthetic data, so the registration itself
   is exercised for real rather than stubbed.
@@ -220,6 +220,36 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
   `test_registration_recovers_the_reference_frame`, and
   `test_the_transform_file_maps_the_result_back_to_the_original` inverts the
   written `.tfm` and lands back on the acquisition.
+- **The registration maths is bit-identical to the implementation it replaced.**
+  `geometry.py` was made about three times faster in 2026-09 by computing each
+  pair's half-alignment once instead of once per triplet, and by calling
+  numpy's own fast paths for `norm` and `cross` directly.
+  `tests/test_geometry_equivalence.py` carries the pre-rewrite code as a
+  reference implementation and asserts `np.array_equal` -- never `allclose` --
+  on random inputs, because a coarse alignment differing in the last bit picks
+  a different triplet on a near-tie, and a different triplet is a different
+  orientation of a patient's skull. `tests/test_ios_file_cache.py` does the
+  same for the IOS engine's file cache, by running a cohort with the cache and
+  with a cache that re-reads, and comparing every written byte.
+- **Patient keys are matched on token boundaries.** `PATIENT_SUFFIXES` used to
+  be matched with `stem.find(suffix)` at any index, so `_OR` matched inside
+  `_ORTHO` and `_scan` inside `_scanned`: `SMITH_ORTHO_Scan.nii.gz` and
+  `SMITH_ORLANDO_Scan.nii.gz` both keyed to `SMITH`, and `discover` then kept
+  one of the two scans and handed it both patients' landmarks. Fixed the way
+  the shared `sadt_areg_common.pairing` was -- `_token_aligned_index` requires
+  the match to close on the end of the stem or a separator, and checks the left
+  edge rather than assuming it. Copied rather than imported: ASO does not
+  depend on that package. 797 real basenames (the staged `DATA/ASO` bundles and
+  this repository's own fixtures) give the same key as before; the 19 names
+  whose key changed are all boundary cases where the old answer was wrong, and
+  in every one the old key is a strict prefix of the new. Pinned by
+  `tests/test_patient_stem_boundaries.py`.
+- **On real data, end to end, four modes.** Semi- and fully-automated CBCT
+  (`DATA/ASO/testfiles/CBCT_SemiAuto`, NIfTI and DICOM) and semi- and
+  fully-automated IOS (`IOS_SemiAuto`, `IOS_FullyAuto`) were run against the
+  code as it stood before those two changes and after, and every file produced
+  -- the 247 MB oriented volume voxel by voxel, the `.tfm` element by element,
+  the meshes point by point -- is byte-identical. Maximum difference: 0.
 - **The real chain, on real weights and a real card.** ASO fully-automated CBCT
   was driven end to end through a real supervisor -- one that runs `ALI` in
   `tools/ALI/.venv` as a subprocess, through `sadt_testkit`'s driver, exactly as
@@ -252,7 +282,7 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
 ```bash
 cd tools/ASO
 uv sync                    # 1.2 GB, no CUDA
-uv run pytest -m "not gpu" # 81 tests, no GPU and no model bundles needed
+uv run pytest -m "not gpu" # 193 tests, no GPU and no model bundles needed
 uv run pytest -m models    # the ALI chain, see tests/data/README.md
 ```
 

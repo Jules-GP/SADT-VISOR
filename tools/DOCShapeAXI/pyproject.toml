@@ -1,0 +1,106 @@
+[project]
+name = "sadt-docshapeaxi"
+version = "0.1.0"
+description = "Classify a 3D anatomical shape and explain the decision on the surface."
+# The deployment image's interpreter (lab-ai:2026.08, python 3.11.13), and the
+# only one the pytorch3d wheel is built for there.
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # Same stack as Crown_Seg, which is the other shapeaxi tool here: upstream
+    # runs both from one shared conda env and leaves torch unpinned, so it
+    # resolves to whatever is current. We are deliberately stricter -- the
+    # pytorch3d wheel tag (`+pt2110cu128`) names one torch version and one CUDA
+    # variant exactly, so the three move together or the C extension does not
+    # load.
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "pytorch3d==0.7.9+pt2110cu128",
+    # PINNED, and this is the whole story of this tool's environment.
+    #
+    # `MHAEncoder.__init__` changed signature at shapeaxi 2.0.0: 1.x takes
+    # `embed_dim`/`hidden_dim`/`num_heads=256`/`K`, 2.x takes
+    # `stages`/`num_heads=[16]`/`pooling_factor`. All five published
+    # checkpoints carry the 1.x hyperparameters, so 2.x raises
+    # `TypeError: MHAEncoder.__init__() got an unexpected keyword argument
+    # 'hidden_dim'` on every one of them.
+    #
+    # Upstream's own installer asks for `shapeaxi>=2.0.2`
+    # (`DOCShapeAXI_utils/install_pytorch.py:186`), which means upstream
+    # cannot load its own released weights.
+    "shapeaxi==1.1.1",
+    "ocnn==2.2.6",
+    "vtk==9.6.2",
+    # shapeaxi 1.1.1 requires numpy<2.0. That is also why upstream's
+    # unpinned conda env resolves captum 0.8.0, which caps numpy the same way:
+    # the two agree, and the numpy-2 stack this tool was first written against
+    # was the thing that did not fit.
+    "numpy==1.26.4",
+    "pandas==2.3.3",
+    # The GradCAM implementation. Upstream uses captum's LayerGradCam rather
+    # than pytorch-grad-cam, and only borrows the latter's rescaling. 0.9.0
+    # rather than upstream's resolved 0.8.0: 0.8.0 caps numpy below 2.0, which
+    # is a contradiction with the numpy every other pin here wants -- so
+    # upstream's conda env necessarily ran this whole stack on numpy 1.x.
+    "captum==0.8.0",
+    # NOT opencv. Upstream imports the whole of OpenCV for one call --
+    # `cv2.resize` of a 2D float map to the renderer's 224x224 -- and every
+    # published opencv wheel caps numpy below the version the rest of this
+    # stack wants. torch's `interpolate` in bilinear mode uses the same
+    # half-pixel convention as `INTER_LINEAR`, so it is the same arithmetic
+    # from a library that is already here. `tests/test_run.py` pins the two
+    # against each other to 1e-5.
+    "tqdm==4.67.1",
+]
+
+# What makes this directory a tool. `name` is the API identity: what a client
+# sends, what deployment.toml is keyed by, and what `sup.run()` names.
+[tool.sadt]
+tool = true
+name = "DOCShapeAXI"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_docshapeaxi"]
+
+# `explicit` is load-bearing on both: without it uv looks for EVERY package on
+# these indexes, and most are not there. It is also what makes them PINNED
+# SOURCES rather than extra index URLs -- as an extra index uv is free to mix
+# registries, which is how a torch 2.11.0+cu130 once got paired with a
+# pt2120cu126 wheel that imports and then dies on a missing libcudart.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+# The prebuilt pytorch3d wheels upstream itself installs from: its own
+# `DOCShapeAXI_utils/install_pytorch.py` reads this index and picks the wheel
+# whose `+ptXXXcuYYY` tag matches the installed torch.
+[[tool.uv.index]]
+name = "pytorch3d-wheels"
+url = "https://ImageMindAnalytics.github.io/pytorch3d-wheels/simple/"
+explicit = true
+
+[tool.uv.sources]
+# Development only: lets this tool's tests run ANOTHER tool through that tool's
+# own venv, as a subprocess, the way the server does.
+sadt-testkit = { path = "../../testkit", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+# Listed as a DIRECT dependency although shapeaxi pulls it transitively,
+# because `tool.uv.sources` only applies to direct dependencies. Left
+# transitive, uv ignores this source and fails with "no wheels with a matching
+# Python version tag".
+pytorch3d = { index = "pytorch3d-wheels" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs the real checkpoints under DATA/DOCShapeAXI/models/.",
+]

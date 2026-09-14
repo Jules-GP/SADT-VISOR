@@ -1,0 +1,45 @@
+[project]
+name = "sadt-autocrop3d"
+version = "0.1.0"
+description = "Crop CBCT volumes and their segmentations to a Slicer ROI box."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # The crop is pure geometry: SimpleITK reads the volume, maps the ROI's
+    # physical corners to indices, slices, and writes it back. numpy is only
+    # used to place a crop back into a blank volume of the original size.
+    "SimpleITK==2.5.6",
+    "numpy==2.3.2",
+    # Marching cubes and the polydata writer, for the surface a cropped
+    # segmentation can also produce. Same pin as every other tool here that
+    # writes a .vtk.
+    "vtk==9.6.2",
+    # How a patient is read from a file name. The scan side and the ROI side
+    # MUST derive the identifier with one rule -- upstream used two, which is
+    # why a cohort whose identifiers contain an underscore was silently
+    # skipped in full. See README.md, "The identifier".
+    "sadt-areg-common",
+]
+
+[tool.sadt]
+tool = true
+name = "AutoCrop3D"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_autocrop3d"]
+
+[tool.uv.sources]
+sadt-areg-common = { path = "../AREG/common" }
+sadt-testkit = { path = "../../testkit", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "surface: exercises the VTK marching-cubes path, which needs the vtk wheel.",
+]

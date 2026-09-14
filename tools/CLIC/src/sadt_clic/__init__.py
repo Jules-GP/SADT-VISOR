@@ -154,14 +154,25 @@ def run(
         )
     written = []
 
+    # Scans are keyed by their path RELATIVE to the input root, and the output
+    # mirrors that tree. Keying on the base name alone made two scans called
+    # `scan.nii.gz` in different folders write the same file: one patient's
+    # segmentation silently replaced another's, and the report said both had
+    # been segmented. A single file is its own root, so it lands directly in
+    # `output_dir` under its own name.
+    root = Path(scans)
+    if root.is_file():
+        root = root.parent
+
     for index, path in enumerate(found, start=1):
         # Position in the batch, never the scan's name: a file name is patient
         # metadata and a progress message is stored and shown.
         progress.report(index, len(found), "scan")
-        entry = {"input": os.path.basename(path)}
+        relative = Path(os.path.relpath(path, root))
+        entry = {"input": relative.as_posix()}
         try:
             written.append(
-                _segment_one(network, path, output_dir, device,
+                _segment_one(network, path, output_dir, relative, device,
                              score_threshold, output_suffix, classes, entry)
             )
         except Exception as exc:
@@ -191,9 +202,14 @@ def run(
     return output_dir
 
 
-def _segment_one(network, path, output_dir, device, score_threshold, suffix,
-                 classes, entry):
-    """One scan, in and out. Returns the path written."""
+def _segment_one(network, path, output_dir, relative, device, score_threshold,
+                 suffix, classes, entry):
+    """One scan, in and out. Returns the path written.
+
+    `relative` is the scan's path relative to the input root; the output is
+    written at the same place under `output_dir`, so a batch of homonyms in
+    different folders keeps them apart.
+    """
     import nibabel as nib
     import numpy as np
 
@@ -204,13 +220,14 @@ def _segment_one(network, path, output_dir, device, score_threshold, suffix,
 
     labels, detections = segment_volume(network, volume, device, score_threshold)
 
-    stem = os.path.basename(path)
+    stem = relative.name
     for extension in (".nii.gz", ".nii"):
         if stem.lower().endswith(extension):
             stem = stem[: -len(extension)]
             break
 
-    destination = output_dir / f"{stem}_{suffix}.nii.gz"
+    destination = output_dir / relative.parent / f"{stem}_{suffix}.nii.gz"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     nib.save(nib.Nifti1Image(labels, image.affine, image.header), str(destination))
 
     entry["status"] = "ok"
@@ -220,7 +237,11 @@ def _segment_one(network, path, output_dir, device, score_threshold, suffix,
     # The same values, named. What a reader of this report actually wants to
     # know is "palatal", not "3".
     entry["detected"] = catalogs.names_for(entry["labels_present"], classes)
-    entry["output"] = destination.name
+    # The path under `output_dir`, not the bare file name. `destination` now
+    # carries the patient's sub-folder, so `.name` would throw it away and two
+    # homonyms would report the identical output -- the very defect the tree
+    # mirroring was added to fix.
+    entry["output"] = destination.relative_to(output_dir).as_posix()
     if not detections:
         # Reported rather than swallowed: a volume the network found nothing in
         # is a legitimate answer AND the signature of a wrong checkpoint, and

@@ -76,6 +76,70 @@ def stub_nnunet(monkeypatch):
     return _install
 
 
+class _FakePredictor:
+    """Records which of nnUNet's two entry points `predict_folder` chose.
+
+    The choice is not cosmetic: the sequential one exists only to keep the GPU
+    resamplers in a process that has a CUDA context, and taking it without them
+    would give up nnUNet's CPU/GPU overlap for nothing.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def initialize_from_trained_model_folder(self, *args, **kwargs):
+        self.calls.append("initialize")
+
+    def predict_from_files(self, *args, **kwargs):
+        self.calls.append("predict_from_files")
+
+    def predict_from_files_sequential(self, *args, **kwargs):
+        self.calls.append("predict_from_files_sequential")
+
+
+@pytest.fixture
+def fake_predictor(monkeypatch):
+    """`predict_folder` with no nnUNet under it: no GPU, no checkpoint."""
+    predictor = _FakePredictor()
+    monkeypatch.setattr(
+        nnunet_runner, "_build_predictor", lambda device, tile_step_size: predictor
+    )
+    return predictor
+
+
+def _configuration_manager(**overrides):
+    """A real nnUNet ConfigurationManager over a stock 3d_fullres plan.
+
+    Real, not a stub, because what the swap has to get right is that class's
+    own behaviour: two `@property @lru_cache` resamplers resolved by name out
+    of the dict this holds.
+    """
+    from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager
+
+    configuration = {
+        # Present only so ConfigurationManager skips its old-plans
+        # reconstruction, which wants a whole network description. Nothing here
+        # touches the architecture.
+        "architecture": {},
+        "resampling_fn_data": "resample_data_or_seg_to_shape",
+        "resampling_fn_data_kwargs": {"is_seg": False, "order": 3, "order_z": 0,
+                                      "force_separate_z": None},
+        "resampling_fn_seg": "resample_data_or_seg_to_shape",
+        "resampling_fn_seg_kwargs": {"is_seg": True, "order": 1, "order_z": 0,
+                                     "force_separate_z": None},
+        "resampling_fn_probabilities": "resample_data_or_seg_to_shape",
+        "resampling_fn_probabilities_kwargs": {"is_seg": False, "order": 1, "order_z": 0,
+                                               "force_separate_z": None},
+    }
+    configuration.update(overrides)
+    return ConfigurationManager(configuration)
+
+
+class _PredictorWithPlans:
+    def __init__(self, configuration_manager):
+        self.configuration_manager = configuration_manager
+
+
 # ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
@@ -442,6 +506,215 @@ def test_run_accepts_a_single_scan_as_readily_as_a_folder(tmp_path, stub_nnunet)
 
 
 # ---------------------------------------------------------------------------
+# GPU resampling
+# ---------------------------------------------------------------------------
+
+# Measured on DATA/AMASSS/testfiles/MG_test_scan.nii.gz (512x512x365 at
+# 0.33 mm) on an RTX 6000 Ada, per bundle, both ways, against a repeated
+# baseline that establishes the noise floor. See README, "GPU resampling":
+# nnUNet's scipy splines outweigh the network by 4x to 23x, and the swap is
+# the whole difference between a 279 s UniversalLab run and a 58 s one. It is
+# lossy, which is why `gpu_resampling` is an argument and why the report
+# records it.
+#
+# Nothing below needs a GPU or a checkpoint: the swap is a rewrite of two
+# strings in a plans dict, and that dict is what these tests hold.
+
+
+def test_the_swap_redirects_both_ends_by_name():
+    """nnUNet resolves both resamplers out of the configuration dict by NAME,
+    so rewriting the two names is the whole mechanism -- no monkeypatching."""
+    manager = _configuration_manager()
+    applied = nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cuda")
+
+    assert applied
+    assert manager.configuration["resampling_fn_data"] == "resample_torch_fornnunet"
+    assert manager.configuration["resampling_fn_probabilities"] == "resample_torch_fornnunet"
+
+
+def test_the_name_written_into_the_plans_is_one_nnunet_can_resolve():
+    """The whole swap is a string nnUNet looks up later, so a typo or an
+    upstream rename fails inside the preprocessor, mid-run, with the scan
+    already read. This is that lookup, run up front."""
+    from nnunetv2.preprocessing.resampling.utils import recursive_find_resampling_fn_by_name
+
+    assert recursive_find_resampling_fn_by_name(nnunet_runner._TORCH_RESAMPLER) is not None
+
+
+def test_the_swap_leaves_the_crop_mask_resampler_alone():
+    """nnUNet resamples the nonzero mask too, and that one keeps its scipy
+    implementation: the measured change is the data and probability ends only,
+    and quietly widening it would move the numbers this was measured against."""
+    manager = _configuration_manager()
+    nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cuda")
+
+    assert manager.configuration["resampling_fn_seg"] == "resample_data_or_seg_to_shape"
+
+
+def test_the_swap_asks_for_linear_which_is_the_whole_numerical_cost():
+    """The input data drops from spline order 3 to order 1 -- torch has no 3D
+    cubic interpolation. That IS the lossiness `gpu_resampling=False` avoids,
+    so it is pinned rather than left to be rediscovered."""
+    manager = _configuration_manager()
+    nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cuda")
+
+    for key in ("resampling_fn_data_kwargs", "resampling_fn_probabilities_kwargs"):
+        assert manager.configuration[key]["mode"] == "linear"
+        assert manager.configuration[key]["is_seg"] is False
+        assert "order" not in manager.configuration[key]
+
+
+def test_the_swap_clears_the_cached_resamplers():
+    """Both are `@property @lru_cache`. A value read before the swap -- which is
+    exactly what a predictor that has already preprocessed one scan holds --
+    would otherwise outlive it, and the run would silently stay on scipy."""
+    manager = _configuration_manager()
+    before = manager.resampling_fn_data
+
+    nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cuda")
+
+    assert manager.resampling_fn_data is not before
+    assert manager.resampling_fn_data.func.__name__ == "resample_torch_fornnunet"
+
+
+def test_the_swap_does_not_reach_the_plans_json_nnunet_writes():
+    """PlansManager hands out a deepcopy of the configuration, which is what
+    makes this safe -- and it is also why the `torch.device` put in here never
+    reaches the plans.json nnUNet saves beside its output, which `json.dump`
+    could not serialize."""
+    import json
+
+    from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
+
+    plans = {
+        "dataset_name": "Dataset000_Test",
+        "plans_name": "nnUNetPlans",
+        "configurations": {"3d_fullres": dict(_configuration_manager().configuration)},
+    }
+    plans_manager = PlansManager(plans)
+    manager = plans_manager.get_configuration("3d_fullres")
+
+    nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cuda")
+
+    json.dumps(plans_manager.plans)  # would raise on a torch.device
+    assert plans["configurations"]["3d_fullres"]["resampling_fn_data"] == (
+        "resample_data_or_seg_to_shape"
+    )
+
+
+def test_the_swap_declines_on_cpu():
+    """There is no GPU to resample on, and the sequential path it selects would
+    then be a pure loss."""
+    manager = _configuration_manager()
+    assert not nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cpu")
+    assert manager.configuration["resampling_fn_data"] == "resample_data_or_seg_to_shape"
+
+
+def test_a_bundle_pinning_its_own_resampler_is_left_alone():
+    """A bundle asking for something other than nnUNet's default was configured
+    that way deliberately, and its geometry is not ours to reinterpret."""
+    manager = _configuration_manager(resampling_fn_probabilities="no_resampling")
+    assert not nnunet_runner._enable_gpu_resampling(_PredictorWithPlans(manager), "cuda")
+    assert manager.configuration["resampling_fn_data"] == "resample_data_or_seg_to_shape"
+
+
+def test_the_gpu_path_runs_everything_in_one_process(monkeypatch, fake_predictor, tmp_path):
+    """`predict_from_files` fans preprocessing and export out to SPAWNED
+    processes, each of which would need its own CUDA context to run a GPU
+    resampler."""
+    monkeypatch.setattr(nnunet_runner, "_enable_gpu_resampling", lambda predictor, device: True)
+
+    nnunet_runner.predict_folder(
+        "model", str(tmp_path / "in"), str(tmp_path / "out"), "cuda", gpu_resampling=True
+    )
+
+    assert fake_predictor.calls == ["initialize", "predict_from_files_sequential"]
+
+
+def test_scipy_resampling_keeps_nnunets_worker_processes(fake_predictor, tmp_path):
+    """With the resamplers on the CPU there is nothing to keep in this process,
+    and the workers are what overlap one scan's export with the next one's
+    preprocessing."""
+    nnunet_runner.predict_folder(
+        "model", str(tmp_path / "in"), str(tmp_path / "out"), "cuda", gpu_resampling=False
+    )
+
+    assert fake_predictor.calls == ["initialize", "predict_from_files"]
+
+
+def test_a_swap_that_did_not_apply_keeps_the_worker_processes(monkeypatch, fake_predictor,
+                                                              tmp_path):
+    """Asking for the GPU is not getting it -- a CPU device, or a bundle with
+    its own resampler. Taking the sequential path anyway would give up the
+    worker overlap and buy nothing."""
+    monkeypatch.setattr(nnunet_runner, "_enable_gpu_resampling", lambda predictor, device: False)
+
+    nnunet_runner.predict_folder(
+        "model", str(tmp_path / "in"), str(tmp_path / "out"), "cuda", gpu_resampling=True
+    )
+
+    assert fake_predictor.calls == ["initialize", "predict_from_files"]
+
+
+def test_the_report_records_that_the_result_is_lossy(tmp_path, stub_nnunet, monkeypatch):
+    """The default is on and it is not bit-identical to nnUNet's own pipeline.
+    Whoever opens a segmentation must be able to see which one made it -- the
+    same reason the report carries tile_step_size."""
+    stub_nnunet()
+    monkeypatch.setattr(nnunet_runner, "resolve_device", lambda requested=None: "cuda")
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
+        input_path=str(tmp_path / "in"),
+        model_path=str(tmp_path / "models" / "DentalSegmentator"),
+    )
+    assert report["gpu_resampling"] is True
+
+    off = pipeline.segment(
+        output_dir=str(tmp_path / "out2"),
+        input_path=str(tmp_path / "in"),
+        model_path=str(tmp_path / "models" / "DentalSegmentator"),
+        gpu_resampling=False,
+    )
+    assert off["gpu_resampling"] is False
+
+
+def test_a_cpu_run_reports_no_gpu_resampling(tmp_path, stub_nnunet):
+    """The argument defaults to True and the CPU cannot honour it. A report
+    saying otherwise would credit a run with a pipeline it did not use."""
+    stub_nnunet()
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
+        input_path=str(tmp_path / "in"),
+        model_path=str(tmp_path / "models" / "DentalSegmentator"),
+        device="cpu",
+        gpu_resampling=True,
+    )
+    assert report["gpu_resampling"] is False
+
+
+def test_run_passes_gpu_resampling_down(tmp_path, monkeypatch):
+    """The server sets it only to override; `run()` is where the default lives,
+    so a value that stopped arriving would be invisible."""
+    seen = {}
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("sadt_batchdentalseg.segment", capture)
+    run(scans=tmp_path / "in", model=tmp_path / "models" / "DentalSegmentator",
+        output_dir=tmp_path / "out", gpu_resampling=False)
+
+    assert seen["gpu_resampling"] is False
+
+
+# ---------------------------------------------------------------------------
 # the real models
 # ---------------------------------------------------------------------------
 
@@ -521,3 +794,40 @@ def test_progress_reports_the_two_ends_and_says_nothing_it_cannot_know(
     assert fractions == sorted(fractions)
     # The scan's own name is patient metadata and never travels in a message.
     assert not any("p1" in event["message"] for event in events)
+@pytest.mark.gpu
+@pytest.mark.models
+@pytest.mark.skipif(
+    not (REAL_MODEL and REAL_SCAN),
+    reason="set SADT_BATCHDENTALSEG_MODEL and SADT_BATCHDENTALSEG_SCAN (see tests/data/README.md)",
+)
+def test_gpu_resampling_agrees_with_the_scipy_pipeline(tmp_path):
+    """The two pipelines on one scan, per label.
+
+    The threshold is 0.97, not the 0.9999 that README's "Validated against"
+    uses for a regression: that one compares this package against the pre-port
+    tool running the SAME arithmetic, where anything below nnUNet's CUDA noise
+    floor is a defect. This compares two deliberately different arithmetics --
+    the input resampling at spline order 1 instead of 3 -- and what it pins is
+    that the difference stays the sub-voxel one that was measured, rather than
+    a structure appearing or vanishing.
+    """
+    common = dict(model=Path(REAL_MODEL), scans=Path(REAL_SCAN))
+    scipy_out = run(output_dir=tmp_path / "scipy", gpu_resampling=False, **common)
+    gpu_out = run(output_dir=tmp_path / "gpu", gpu_resampling=True, **common)
+
+    with open(gpu_out / "BatchDentalSeg_report.json") as handle:
+        report = json.load(handle)
+    assert report["gpu_resampling"] is True
+
+    reference = sitk.GetArrayFromImage(sitk.ReadImage(str(next(scipy_out.rglob("*_Seg.nii.gz")))))
+    test = sitk.GetArrayFromImage(sitk.ReadImage(str(next(gpu_out.rglob("*_Seg.nii.gz")))))
+    assert reference.shape == test.shape
+
+    for name, value in report["labels"].items():
+        in_reference = reference == value
+        in_test = test == value
+        total = int(in_reference.sum()) + int(in_test.sum())
+        if total == 0:
+            continue
+        dice = 2.0 * int((in_reference & in_test).sum()) / total
+        assert dice > 0.97, f"{name}: Dice {dice:.4f} against the scipy pipeline"

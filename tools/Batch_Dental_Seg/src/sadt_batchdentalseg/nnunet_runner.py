@@ -6,6 +6,12 @@ crashed inference tree, reclaiming stray workers, a RAM watchdog. None of it
 applies here -- the Python API returns when it is done, and the server bounds
 concurrency.
 
+The resampling runs on the GPU too (see `_enable_gpu_resampling`), which is
+where the run time actually goes -- the network is a fraction of it. AMASSS
+measured that first; the four bundles here were measured separately, because
+their models are not AMASSS's and a numerical cost measured on one network says
+nothing about another. See README.md, "GPU resampling".
+
 AMASSS carries a near-identical module and they stay separate copies. In the
 server that was because `registry.py` imported every tool at startup, so one
 tool's missing dependency would take both out of the registry; here it is
@@ -95,17 +101,95 @@ def _build_predictor(device: str, tile_step_size: float):
     return nnUNetPredictor(**{key: value for key, value in options.items() if key in accepted})
 
 
+# The resampler nnUNet's own plans name by default, and the only one we are
+# willing to substitute. All four bundles ask for it; one asking for anything
+# else (no_resampling, a custom function) was configured that way deliberately
+# and its geometry is not ours to reinterpret.
+_STOCK_RESAMPLER = "resample_data_or_seg_to_shape"
+# The two ends that cost: the input volume on the way to the model's grid, and
+# the logits on the way back. nnUNet has a third, `resampling_fn_seg` for the
+# nonzero mask it crops by, and that one is deliberately NOT swapped -- it is
+# 4.5 s of a 58 s run, it is the only one of the three that is `is_seg=True`,
+# and matching AMASSS exactly is what keeps the numerical change to the one
+# thing that was measured.
+_RESAMPLING_KEYS = ("resampling_fn_data", "resampling_fn_probabilities")
+# What we substitute, written as the string nnUNet will resolve it back by --
+# NOT read off the imported function's `__name__`. The two are the same thing
+# right up until something has wrapped that module attribute, and then the
+# plans carry a name that resolves to nothing.
+_TORCH_RESAMPLER = "resample_torch_fornnunet"
+
+
+def _enable_gpu_resampling(predictor, device: str) -> bool:
+    """Point this predictor's resamplers at the GPU. Returns whether it applied.
+
+    Resampling, not inference, is where a run goes: nnUNet's defaults are scipy
+    splines pinned to one core, and on a 512x512x365 CBCT at 0.33 mm they
+    outweigh the network by 4x (Naso), 8-9x (DentalSegmentator, Pediatric) and
+    23x (UniversalLab, whose 55 output classes make one resampling 190 s).
+    nnUNet ships torch equivalents, so there is nothing to reimplement, only to
+    select.
+
+    Selected by NAME: nnUNet resolves both resampling functions out of the
+    configuration dict via `recursive_find_resampling_fn_by_name`, so rewriting
+    the two names redirects both ends. No monkeypatching.
+
+    Mutating that dict is safe because PlansManager hands out a `deepcopy`: it
+    touches neither the shared plans nor a concurrent run, and the
+    `torch.device` put in here never reaches the `plans.json` nnUNet writes
+    beside its output (which `json.dump` could not serialize).
+    """
+    if not device.startswith("cuda"):
+        return False
+
+    import torch
+
+    # The module, and then the name in it: nnUNet resolves the name out of this
+    # very module, so checking it here is checking the thing that will happen.
+    try:
+        from nnunetv2.preprocessing.resampling import resample_torch
+    except ImportError:
+        logger.info("This nnUNet has no torch resampler; keeping the scipy one")
+        return False
+
+    if not hasattr(resample_torch, _TORCH_RESAMPLER):
+        logger.info("This nnUNet has no %s; keeping the scipy resampler", _TORCH_RESAMPLER)
+        return False
+
+    configuration_manager = predictor.configuration_manager
+    configuration = configuration_manager.configuration
+
+    if any(configuration.get(key) != _STOCK_RESAMPLER for key in _RESAMPLING_KEYS):
+        logger.info("Model plans request a non-default resampler; leaving it alone")
+        return False
+
+    for key in _RESAMPLING_KEYS:
+        configuration[key] = _TORCH_RESAMPLER
+        # 'linear' is order 1, already what the plans ask for on the
+        # probabilities. The input data drops from order 3 to order 1 (torch
+        # has no 3D cubic interpolation): that is the whole numerical
+        # difference, and it is what `gpu_resampling=False` turns off.
+        configuration[f"{key}_kwargs"] = {
+            "is_seg": False,
+            "device": torch.device(device),
+            "mode": "linear",
+        }
+
+    # Both are `@property @lru_cache`, so a value read before this point would
+    # otherwise outlive the swap.
+    manager_class = type(configuration_manager)
+    for key in _RESAMPLING_KEYS:
+        getattr(manager_class, key).fget.cache_clear()
+
+    return True
+
+
 def predict_folder(model_folder: str, input_dir: str, output_dir: str, device: str,
-                   tile_step_size: float = 0.5) -> None:
+                   tile_step_size: float = 0.5, gpu_resampling: bool = True) -> None:
     """Segment every `*_0000.nii.gz` in `input_dir`, writing masks to `output_dir`.
 
     A whole folder per call, so the checkpoint is loaded once for the batch
     rather than once per scan.
-
-    AMASSS additionally redirects nnUNet's resamplers to the GPU, which is
-    worth ~2.5x there. It is deliberately not done here yet: it drops the input
-    resampling from spline order 3 to order 1, and nothing has measured what
-    that costs THESE models.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -117,14 +201,30 @@ def predict_folder(model_folder: str, input_dir: str, output_dir: str, device: s
         use_folds=(0,),
         checkpoint_name=CHECKPOINT_NAME,
     )
-    predictor.predict_from_files(
-        input_dir,
-        output_dir,
-        save_probabilities=False,
-        overwrite=True,
-        num_processes_preprocessing=2,
-        num_processes_segmentation_export=2,
-    )
+
+    on_gpu = bool(gpu_resampling) and _enable_gpu_resampling(predictor, device)
+
+    if on_gpu:
+        # `predict_from_files` fans preprocessing and export out to SPAWNED
+        # processes, each of which would need its own CUDA context to run a
+        # GPU resampler. The GPU path therefore runs everything in this
+        # process, trading away the CPU/GPU overlap on multi-scan batches --
+        # a smaller loss than the resampling win.
+        predictor.predict_from_files_sequential(
+            input_dir,
+            output_dir,
+            save_probabilities=False,
+            overwrite=True,
+        )
+    else:
+        predictor.predict_from_files(
+            input_dir,
+            output_dir,
+            save_probabilities=False,
+            overwrite=True,
+            num_processes_preprocessing=2,
+            num_processes_segmentation_export=2,
+        )
 
 
 __all__ = [

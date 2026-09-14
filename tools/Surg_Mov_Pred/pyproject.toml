@@ -48,9 +48,14 @@ packages = ["src/sadt_surgmovpred"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Deselected by DEFAULT, not merely skipped: a plain `pytest` must not depend
+# on 1.4 GB of model packages being staged, and a suite whose green line is
+# half skips says nothing. Run them by hand with `-m models -o addopts=` and
+# report the result in the PR.
+addopts = "-m 'not gpu and not models'"
 markers = [
-    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
-    "models: needs the real model packages and is skipped without them. See tests/data/README.md.",
+    "gpu: needs a CUDA device. Deselected by default; run it by hand and report the result in the PR.",
+    "models: needs the real model packages, named by SADT_SURGMOVPRED_MODELS. Deselected by default. See tests/data/README.md.",
 ]
 
 [tool.uv.sources]

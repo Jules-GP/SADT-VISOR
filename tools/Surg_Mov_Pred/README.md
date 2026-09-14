@@ -45,7 +45,7 @@ The algorithm itself is unchanged: `clean_name`, `find_id_column`,
 | Model files | One subfolder per predicted measurement, each holding a `stacking_package.pkl` of `{target_name, features_names, scaler, model}`. Fetched by the server into `/DATA/SurgMovPred/models`; the shipped set is `all_models/` -- 112 packages, 1.4 GB. |
 | GPU | None. This tool is CPU-only. |
 
-Two behaviours worth knowing before reading a result:
+Three behaviours worth knowing before reading a result:
 
 - **A model whose features the input does not carry is skipped, not fatal.** A
   thinner table simply yields fewer predicted columns. Check the column count
@@ -53,6 +53,11 @@ Two behaviours worth knowing before reading a result:
 - **The patient identifier is detected, not required.** `#`, `ID`, `PatientID`,
   `Patient Number`, `Subject_ID` and similar all match. With none of them,
   predictions still run and `IDPatient` comes out blank.
+- **A batch folder is searched flat, not recursively.** The two discoveries in
+  this tool differ on purpose: model packages are found with `**/`, because a
+  bundle nests them one folder per target, while a batch of tables arrives as
+  one unpacked archive. A folder holding only subfolders therefore yields no
+  table at all and says so, rather than half a cohort.
 
 ## Versions
 
@@ -98,15 +103,21 @@ was chosen for support life rather than to reproduce a number.
 - **Tolerance**: none needed -- equality was exact, so any future difference is a
   regression rather than noise.
 
-GPU tests: none exist, the tool is CPU-only.
+GPU tests: none exist, the tool is CPU-only -- `torch` is not installed in this
+venv at all, and a test asserts it.
+
+The `models` marker is **deselected by default** rather than skipped
+(`addopts = "-m 'not gpu and not models'"`): a plain `pytest` must not depend on
+1.4 GB of packages being staged, and a green line that is half skips says
+nothing.
 
 ## Working on it
 
 ```bash
 cd tools/Surg_Mov_Pred
 uv sync
-uv run pytest              # 24 tests on models built in the test itself
-uv run pytest -m models    # against the real packages, see tests/data/README.md
+uv run pytest              # 154 tests on models built in the test itself
+uv run pytest -m models -o addopts=   # the real packages, see tests/data/README.md
 ```
 
 ```bash
