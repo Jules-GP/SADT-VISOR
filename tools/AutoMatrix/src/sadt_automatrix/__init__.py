@@ -9,11 +9,15 @@ from typing import Literal
 
 from . import progress
 from .pipeline import (
+    IMAGE_EXTENSIONS,
     apply_to_landmarks,
     patient_of,
     is_image_file,
     is_landmark_file,
     is_transform_file,
+    legacy_file_key,
+    looks_like_a_label_map,
+    legacy_transform_key,
     read_transform,
     resample,
 )
@@ -27,10 +31,11 @@ def run(
     files: Path,
     transforms: Path,
     output_dir: Path,
-    reference: Path = "",
-    content: Literal["Scan", "Segmentation"] = "Scan",
+    same_transform_for_every_patient: bool = False,
     name_output_after_transform: bool = False,
     output_suffix: str = "Reg",
+    content: Literal["Automatic", "Scan", "Segmentation"] = "Automatic",
+    reference: Path = "",
 ) -> Path:
     """Apply each patient's transform to their scans, segmentations or landmarks.
 
@@ -41,13 +46,18 @@ def run(
             files by patient name. A patient with several transforms has each
             of them applied.
         output_dir: Where the results are written. The input tree is mirrored.
-        reference: Optional volume defining the output grid. Without it each
-            image keeps its own grid and only its origin moves.
-        content: "Segmentation" resamples with nearest neighbour, so no label
-            is invented; "Scan" resamples linearly.
+        same_transform_for_every_patient: Apply the one transform given to every
+            patient, instead of matching it to a patient by name. What a mirror
+            matrix needs, and meaningless with more than one transform.
         name_output_after_transform: Add the transform's name to each output,
             which is what tells two transforms of one patient apart.
         output_suffix: Appended to each output name.
+        content: How the voxels are resampled. "Segmentation" uses nearest
+            neighbour, so no label is invented; "Scan" interpolates linearly;
+            "Automatic" reads it off each file, which is per FILE rather than
+            per run and is what a folder holding both needs.
+        reference: Optional volume defining the output grid. Without it each
+            image keeps its own grid and only its origin moves.
 
     Returns:
         The output directory, holding the transformed files and
@@ -71,6 +81,13 @@ def run(
             f"Expected one of {', '.join(('.tfm', '.mat', '.h5', '.txt'))}."
         )
 
+    # Everything the legacy module could pair and this port cannot, retried --
+    # never a replacement for the rule above, only a second chance for what it
+    # left over. See `_pair_like_legacy`.
+    paired_by = _pair_like_legacy(
+        subjects, by_patient, same_transform_for_every_patient
+    )
+
     reference_image = None
     if reference:
         import SimpleITK as sitk
@@ -86,6 +103,10 @@ def run(
         "without_a_transform": sorted(set(subjects) - set(by_patient)),
         "transforms_without_a_file": sorted(set(by_patient) - set(subjects)),
     }
+    # Omitted entirely when every pair came from this port's own rule, which is
+    # the normal case: a key present here is a key someone may need to explain.
+    if paired_by:
+        report["paired_by"] = dict(sorted(paired_by.items()))
 
     written = []
     for index, patient in enumerate(sorted(subjects), start=1):
@@ -105,7 +126,7 @@ def run(
                 try:
                     written.append(_apply_one(
                         path, matrix, files, output_dir, reference_image,
-                        content == "Segmentation", name_output_after_transform,
+                        content, name_output_after_transform,
                         output_suffix, entry,
                     ))
                 except Exception as exc:
@@ -152,44 +173,120 @@ def run(
     return output_dir
 
 
-def _discover(root: str) -> dict:
-    """{patient: [paths]} for everything transformable under `root`."""
+def _pair_like_legacy(subjects: dict, by_patient: dict, share_one: bool) -> dict:
+    """Pair what this port's own rule left over, the way the legacy module did.
+
+    Two behaviours of SlicerAutomatedDentalTools that `patient_of` does not
+    reproduce, and without which all four of the datasets published with that
+    module transform nothing:
+
+    1. its substring cut of a file name (`pipeline.legacy_*_key`);
+    2. a single transform applied to every patient, with no pairing at all --
+       the mirror matrix is used exactly that way, and VFACE drives it eight
+       times per run.
+
+    Both are reached ONLY by a patient this port could not pair, and only a
+    transform this port did not already give to someone else is offered. A run
+    that pairs today therefore keeps its pairs, its outputs and its bytes; this
+    can turn a failure into a result and nothing else.
+
+    `by_patient` is extended in place. Returns {patient: which rule paired it},
+    for the report -- a patient paired by the normal rule is absent from it,
+    that being the default.
+    """
+    rules: dict = {}
+    every_transform = {p for paths in by_patient.values() for p in paths}
+
+    # Asked for outright, so it is not a fallback and does not wait for the
+    # normal rule to fail: upstream's own semantics, where one transform file is
+    # applied to everyone whatever the names say.
+    if share_one and len(every_transform) == 1:
+        only = next(iter(every_transform))
+        for key in subjects:
+            by_patient[key] = [only]
+            rules[key] = "asked to share one transform"
+        return rules
+
+    unpaired = set(subjects) - set(by_patient)
+    if not unpaired:
+        return rules
+
+    # 1. Upstream's substring cut, on both sides. Restricted to transforms that
+    #    went unpaired, so it can never take one from a patient already matched.
+    spare = {key: paths for key, paths in by_patient.items() if key not in subjects}
+    if spare:
+        wanted: dict = {}
+        for key in unpaired:
+            for path in subjects[key]:
+                legacy = legacy_file_key(os.path.basename(path))
+                if legacy:
+                    wanted.setdefault(legacy, set()).add(key)
+        offered: dict = {}
+        for paths in spare.values():
+            for path in paths:
+                legacy = legacy_transform_key(os.path.basename(path))
+                if legacy:
+                    offered.setdefault(legacy, []).append(path)
+        for legacy, keys in wanted.items():
+            matrices = offered.get(legacy)
+            if not matrices:
+                continue
+            for key in keys:
+                by_patient[key] = sorted(matrices)
+                rules[key] = "legacy file names"
+        unpaired -= set(rules)
+
+    # 2. One transform and ONE patient: there is nothing else it could belong
+    #    to, so pairing it costs no guess. Upstream is looser -- a single
+    #    transform file goes to everyone there, however many patients -- and
+    #    that difference is deliberate. Across a COHORT the guess is how one
+    #    patient's matrix silently lands on everybody, a failure that looks
+    #    exactly like a success, and the legacy module's own callers were bitten
+    #    by it. A caller who means it says so with `same_transform_for_every_patient`.
+    if unpaired == set(subjects) and len(every_transform) == 1 and len(subjects) == 1:
+        only = next(iter(every_transform))
+        for key in subjects:
+            by_patient[key] = [only]
+            rules[key] = "the only transform, applied to every patient"
+
+    return rules
+
+
+def _walk(root: str, accept) -> dict:
+    """{patient: [paths]} for every file under `root` that `accept` keeps.
+
+    A single file is answered as itself, a folder is walked recursively, and
+    both spellings key on `patient_of` -- which is what lets a transform be
+    matched to the scans it applies to whichever way the caller pointed at it.
+    """
     found: dict = {}
     if os.path.isfile(root):
         name = os.path.basename(root)
-        if is_image_file(name) or is_landmark_file(name):
+        if accept(name):
             found.setdefault(patient_of(name), []).append(root)
         return found
 
     for directory, _subdirs, names in os.walk(root):
         for name in sorted(names):
-            if name.startswith(".") or not (is_image_file(name) or is_landmark_file(name)):
+            if name.startswith(".") or not accept(name):
                 continue
             found.setdefault(patient_of(name), []).append(
                 os.path.join(directory, name)
             )
     return found
+
+
+def _discover(root: str) -> dict:
+    """{patient: [paths]} for everything transformable under `root`."""
+    return _walk(root, lambda name: is_image_file(name) or is_landmark_file(name))
 
 
 def _discover_transforms(root: str) -> dict:
     """{patient: [transform paths]}, keyed by the same rule the files are."""
-    found: dict = {}
-    if os.path.isfile(root):
-        if is_transform_file(os.path.basename(root)):
-            found.setdefault(patient_of(os.path.basename(root)), []).append(root)
-        return found
-
-    for directory, _subdirs, names in os.walk(root):
-        for name in sorted(names):
-            if name.startswith(".") or not is_transform_file(name):
-                continue
-            found.setdefault(patient_of(name), []).append(
-                os.path.join(directory, name)
-            )
-    return found
+    return _walk(root, is_transform_file)
 
 
-def _apply_one(path, matrix, input_root, output_dir, reference, is_segmentation,
+def _apply_one(path, matrix, input_root, output_dir, reference, content,
                name_after_transform, suffix, entry) -> str:
     """One file through one transform. Returns the path written."""
     import SimpleITK as sitk
@@ -212,7 +309,7 @@ def _apply_one(path, matrix, input_root, output_dir, reference, is_segmentation,
         entry["outputs"].append({"file": destination.name, "points_moved": moved})
         return str(destination)
 
-    for extension in (".nii.gz", ".nrrd.gz", ".gipl.gz", ".nii", ".nrrd", ".gipl"):
+    for extension in IMAGE_EXTENSIONS:
         if name.lower().endswith(extension):
             stem, tail_extension = name[: -len(extension)], extension
             break
@@ -221,6 +318,18 @@ def _apply_one(path, matrix, input_root, output_dir, reference, is_segmentation,
 
     destination = destination.parent / f"{stem}_{tail}{tail_extension}"
     image = sitk.ReadImage(path)
+
+    # A caller that named the content is believed; "Automatic" is read off the
+    # file. Recorded in the report either way, because which interpolator ran is
+    # not visible in the result and is the difference between a label map that
+    # survived and one that grew labels nobody segmented.
+    written_entry = {"file": destination.name}
+    if content == "Automatic":
+        is_segmentation = looks_like_a_label_map(image)
+        written_entry["detected"] = "segmentation" if is_segmentation else "scan"
+    else:
+        is_segmentation = content == "Segmentation"
+
     sitk.WriteImage(resample(image, transform, reference, is_segmentation), str(destination))
-    entry["outputs"].append({"file": destination.name})
+    entry["outputs"].append(written_entry)
     return str(destination)

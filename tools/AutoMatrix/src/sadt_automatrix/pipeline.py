@@ -47,7 +47,11 @@ TRANSFORM_EXTENSIONS = (".tfm", ".mat", ".h5", ".hdf5", ".txt")
 
 # What may be transformed. `.mrk.json` is a Slicer markups file and is handled
 # as points; everything else is read as an image.
-IMAGE_EXTENSIONS = (".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz")
+#
+# Longest extension first, so a caller splitting a name against this tuple
+# never cuts ".nii.gz" short at ".nii". `is_image_file` only tests membership,
+# which `str.endswith` answers whatever the order, so the two uses agree.
+IMAGE_EXTENSIONS = (".nii.gz", ".nrrd.gz", ".gipl.gz", ".nii", ".nrrd", ".gipl")
 LANDMARK_EXTENSIONS = (".mrk.json",)
 
 
@@ -168,3 +172,119 @@ def _read_plain_matrix(path: str):
     if len(rows) != 4 or any(len(row) != 4 for row in rows):
         return None
     return rows
+
+
+# ---------------------------------------------------------------------------
+# The pairing SlicerAutomatedDentalTools uses, ported verbatim.
+#
+# `patient_of` above drops whole underscore-delimited tokens, which is stricter
+# and does not reproduce this: upstream cuts a name at the first occurrence of a
+# token as a SUBSTRING, so `_Left` also truncates `_LeftMI`. Every one of the
+# four datasets published with the legacy module pairs under these rules and
+# under none of ours, which is the only reason they are here.
+#
+# The two lists are NOT the same on each side, and that asymmetry is
+# load-bearing rather than an oversight: the file side leaves `_Left`/`_Right`
+# alone, so `r_2_T1_LeftMI_model_Or.vtk` reaches `r_2` through its `_T1` and not
+# by losing `LeftMI`. Keeping one shared list would key it to `r_2_T1`.
+#
+# These are a FALLBACK. Nothing calls them for a name the rule above could pair.
+# ---------------------------------------------------------------------------
+
+_LEGACY_FILE_CUTS = (
+    "_Seg", "_seg", "_Scan", "_scan", "_Or", "_OR", "_MAND", "_MD", "_MAX",
+    "_MX", "_CB", "_lm", "_T2", "_T1", "_Cl", "_MR",
+)
+
+_LEGACY_TRANSFORM_CUTS = (
+    "_SegOr", "_Left", "_left", "_Right", "_right", "_Or", "_OR", "_MAND",
+    "_MD", "_MAX", "_MX", "_CB", "_lm", "_T2", "_T1", "_Cl", "_MA", "_Mir",
+    "_mir", "_Mirror", "_mirror", "_MR",
+)
+
+
+def _legacy_cut(name: str, cuts) -> str:
+    """`name` cut at each token in turn, then at its first dot.
+
+    Upstream chains `.split(token)[0]`, so a name that BEGINS with a token
+    reduces to the empty string. That is reproduced rather than guarded here --
+    the caller ignores an empty key, which is the only sane thing to pair on.
+    """
+    stem = name
+    for token in cuts:
+        stem = stem.split(token)[0]
+    stem = stem.split(".")[0]
+    # Upstream follows its fixed list with `_T0` .. `_T49`, which is what strips
+    # a timepoint the two lists above do not already name.
+    for index in range(50):
+        stem = stem.split("_T" + str(index))[0]
+    return stem
+
+
+def legacy_file_key(filename: str) -> str:
+    """The patient a scan, segmentation or landmark file belongs to, upstream's way."""
+    return _legacy_cut(filename, _LEGACY_FILE_CUTS)
+
+
+def legacy_transform_key(filename: str) -> str:
+    """The patient a transform belongs to, upstream's way."""
+    return _legacy_cut(filename, _LEGACY_TRANSFORM_CUTS)
+
+
+# ---------------------------------------------------------------------------
+# Scan or segmentation, read off the data instead of asked for.
+#
+# Which one it is decides the interpolator, and getting it wrong on a label map
+# INVENTS labels that were never segmented -- so it is worth knowing rather than
+# assuming. Measured on this server's own data: a mask holds 2 distinct values
+# and a CBCT holds 3746 to 7993, three orders of magnitude apart, and every scan
+# carries the negative Hounsfield numbers no label map ever has.
+#
+# The caller can still say, and a caller that says is believed: this only fills
+# in for `content="Automatic"`.
+# ---------------------------------------------------------------------------
+
+# Above this many distinct values it is a scan. A label map has tens -- the
+# richest here is Batch_Dental_Seg's 32 permanent teeth, 20 deciduous and 3
+# structures -- while a scan normalised into 0..255 has essentially all of them,
+# which is the case this number is set to separate.
+LABEL_MAP_MAX_LABELS = 128
+
+# And above this value, whatever the count. A CBCT exported unsigned lands in
+# 0..4095, so it never reaches the counting step at all.
+_LABEL_MAP_MAX_VALUE = 1000
+
+
+def looks_like_a_label_map(image) -> bool:
+    """Whether this volume holds labels rather than intensities.
+
+    Three tests, cheapest first, each of which alone settles a scan:
+
+    1. a floating-point volume is a scan -- labels are whole numbers;
+    2. a negative value is a Hounsfield number, which no label map has;
+    3. a value above `_LABEL_MAP_MAX_VALUE` is out of any label table.
+
+    Only then are the distinct values counted, and counted in chunks so a scan
+    that slipped through the first three stops at the first chunk instead of
+    sorting a hundred megavoxels to learn what it already looks like.
+    """
+    import numpy as np
+    import SimpleITK as sitk
+
+    if image.GetPixelID() in (sitk.sitkFloat32, sitk.sitkFloat64):
+        return False
+
+    # A COPY, not GetArrayViewFromImage: a view does not keep its image alive,
+    # and reading one after the image is collected quietly returns zeros.
+    array = sitk.GetArrayFromImage(image)
+    if array.size == 0:
+        return False
+    if array.min() < 0 or array.max() > _LABEL_MAP_MAX_VALUE:
+        return False
+
+    seen = set()
+    for chunk in np.array_split(array.reshape(-1), 32):
+        seen.update(np.unique(chunk).tolist())
+        if len(seen) > LABEL_MAP_MAX_LABELS:
+            return False
+    return True

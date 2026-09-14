@@ -132,7 +132,11 @@ def _enable_gpu_resampling(predictor, device: str) -> bool:
         return False
 
     try:
-        from nnunetv2.preprocessing.resampling.resample_torch import (  # noqa: F401
+        # Imported to prove it EXISTS, then named rather than called: nnUNet
+        # resolves both resampling functions out of the configuration dict by
+        # name. Using `__name__` below keeps the probe and the name it writes
+        # from being two literals that can drift apart.
+        from nnunetv2.preprocessing.resampling.resample_torch import (
             resample_torch_fornnunet,
         )
     except ImportError:
@@ -149,7 +153,7 @@ def _enable_gpu_resampling(predictor, device: str) -> bool:
         return False
 
     for key in _RESAMPLING_KEYS:
-        configuration[key] = "resample_torch_fornnunet"
+        configuration[key] = resample_torch_fornnunet.__name__
         # 'linear' is order 1, already what the plans ask for on the
         # probabilities. The input data drops from order 3 to order 1 (torch
         # has no 3D cubic interpolation): that is the whole numerical
