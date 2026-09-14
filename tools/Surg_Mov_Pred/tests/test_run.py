@@ -7,6 +7,7 @@ into git. `test_real_models_*` runs against the real ones when
 skipped otherwise -- see tests/data/README.md.
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -211,6 +212,29 @@ def test_load_measurements_reads_every_supported_format(tmp_path):
         assert len(loaded) == 2, suffix
 
 
+def test_a_batch_folder_is_logged_by_count_and_never_by_its_path(tmp_path, caplog):
+    """The input folder arrives named by the caller and unpacked under that
+    name, so its path can carry a patient's.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log -- so a path
+    written here outlives the run and its job directory. The count is what this
+    line was for.
+    """
+    batch = tmp_path / "Smith_John_2019_measurements"
+    batch.mkdir()
+    frame = pd.DataFrame({"PatientID": [1, 2], "f1": [10, 20]})
+    frame.to_csv(batch / "a.csv", index=False)
+    frame.to_csv(batch / "b.csv", index=False)
+
+    with caplog.at_level(logging.INFO, logger="sadt_surgmovpred.pipeline"):
+        loaded = load_measurements(batch)
+
+    assert len(loaded) == 4
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == ["Loading 2 table(s) from the input folder"], messages
+
+
 def test_save_results_writes_excel_and_csv(tmp_path):
     outputs = save_results(pd.DataFrame({"IDPatient": [1], "target_a": [10.0]}), tmp_path / "out")
 
@@ -252,3 +276,38 @@ def test_real_models_predict_every_target(tmp_path):
     assert len(predictions.columns) == 112, "every shipped model produced a column"
     assert results["IDPatient"].notna().all()
     assert np.isfinite(predictions.to_numpy(dtype=float)).all()
+
+
+# --- the models, when nobody names a folder ---------------------------------
+
+
+def test_the_installed_models_are_used_when_none_are_named(measurements, tmp_path):
+    """A panel with no model field sends none, and the tool finds its own.
+
+    The packages are filed one level down in the published bundle
+    (`models/all_models/<target>/`), which costs nothing: `load_model_packages`
+    globs for the package file underneath whatever it is handed.
+    """
+    make_model(tmp_path / "data" / "Surg_Mov_Pred" / "models" / "all_models", "f1_Pred")
+
+    outputs = run(measurements=measurements, output_dir=tmp_path / "out",
+                  data_root=tmp_path / "data")
+
+    assert Path(outputs["csv"]).is_file()
+    assert "f1_Pred" in pd.read_csv(outputs["csv"]).columns
+
+
+def test_a_named_model_folder_still_wins(model, measurements, tmp_path):
+    """Naming one is pinning which models ran, and is obeyed."""
+    make_model(tmp_path / "data" / "Surg_Mov_Pred" / "models", "other_Pred")
+
+    outputs = run(measurements=measurements, model=model,
+                  output_dir=tmp_path / "out", data_root=tmp_path / "data")
+
+    columns = pd.read_csv(outputs["csv"]).columns
+    assert "f1_Pred" in columns and "other_Pred" not in columns
+
+
+def test_no_model_and_no_data_root_says_which_of_the_two_is_missing(measurements, tmp_path):
+    with pytest.raises(ValueError, match="no data root"):
+        run(measurements=measurements, output_dir=tmp_path / "out")

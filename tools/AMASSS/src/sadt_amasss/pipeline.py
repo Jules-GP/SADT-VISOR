@@ -27,7 +27,7 @@ import re
 import shutil
 import time
 
-from . import nnunet_runner, vtk_export
+from . import nnunet_runner, progress, vtk_export
 from .catalog import (
     DEFAULT_MERGE_MODES,
     DEFAULT_STRUCTURES,
@@ -101,14 +101,24 @@ def discover_scans(input_path: str, prediction_id: str) -> list:
         return [input_path]
 
     found = []
+    previous_outputs = 0
     for root, _dirs, files in os.walk(input_path):
         for name in files:
             if not name.lower().endswith(SCAN_EXTENSIONS):
                 continue
             if is_previous_output(name, prediction_id):
-                logger.info("Skipping %s: looks like a previous AMASSS output", name)
+                previous_outputs += 1
                 continue
             found.append(os.path.join(root, name))
+
+    # How many, never which: a file name is patient metadata, and a tool's log
+    # outlives the run that wrote it. The count is what a caller needs here --
+    # it says whether the folder was re-fed to a second run.
+    if previous_outputs:
+        logger.info(
+            "Skipping %d file(s) that look like a previous AMASSS output",
+            previous_outputs,
+        )
 
     if not found:
         # FIX: the original called sys.exit(1) here, which produces no usable
@@ -326,7 +336,11 @@ def _run(scans, models, missing_structures, output_dir, work_dir, structures, me
     os.makedirs(nnunet_input, exist_ok=True)
 
     scan_records = []
+    # Three phases share the bar. Only the middle one is long, so it is given
+    # most of the range; what is exact is the counter in each message, the
+    # split between the phases being a weighting and nothing more.
     for index, scan_path in enumerate(scans):
+        progress.report(index + 1, len(scans), "reading scan", end=0.1)
         case_id = f"p_{index:03d}"
         record = {
             "case_id": case_id,
@@ -340,7 +354,10 @@ def _run(scans, models, missing_structures, output_dir, work_dir, structures, me
         try:
             _convert_to_nifti(scan_path, os.path.join(nnunet_input, f"{case_id}_0000.nii.gz"))
         except Exception as exc:
-            logger.exception("Could not read scan %s", scan_path)
+            # Position in the batch, never the scan's name -- the same rule the
+            # progress call above follows, and it matters more here: a failed
+            # run's stderr is copied into the server's own persistent log.
+            logger.exception("Could not read scan %d of %d", index + 1, len(scans))
             record["status"] = "failed"
             record["error"] = f"Unreadable input: {exc}"
         scan_records.append(record)
@@ -352,7 +369,11 @@ def _run(scans, models, missing_structures, output_dir, work_dir, structures, me
     # --- Inference: one model load per structure --------------------------
     predictions = {}
     failed_structures = {}
-    for code, model_folder in models.items():
+    for structure_index, (code, model_folder) in enumerate(models.items(), start=1):
+        # Per STRUCTURE, which is the honest unit here: one nnUNet call covers
+        # the whole cohort, so there is no per-scan position to report inside
+        # it and interpolating one would invent a number the tool cannot know.
+        progress.report(structure_index, len(models), "structure", start=0.1, end=0.9)
         structure_output = os.path.join(work_dir, f"pred_{code}")
         try:
             logger.info("Predicting %s on %s", code, device)
@@ -373,7 +394,8 @@ def _run(scans, models, missing_structures, output_dir, work_dir, structures, me
         )
 
     # --- Assemble per-scan outputs ----------------------------------------
-    for record in readable:
+    for index, record in enumerate(readable, start=1):
+        progress.report(index, len(readable), "writing scan", start=0.9)
         scan_started = time.monotonic()
         try:
             _assemble_scan_outputs(
@@ -392,7 +414,9 @@ def _run(scans, models, missing_structures, output_dir, work_dir, structures, me
             # FIX: the original re-raised on the LAST scan only, so a batch
             # could abort at the very end and lose everything already
             # produced. Every failure is recorded; the run continues.
-            logger.exception("Failed to assemble outputs for %s", record["input"])
+            logger.exception(
+                "Failed to assemble outputs for scan %d of %d", index, len(readable)
+            )
             record["status"] = "failed"
             record["error"] = str(exc)
         record["duration_seconds"] = round(time.monotonic() - scan_started, 2)
@@ -458,7 +482,10 @@ def _assemble_scan_outputs(record, predictions, output_dir, work_dir, prediction
     for code, structure_output in predictions.items():
         predicted_file = os.path.join(structure_output, f"{case_id}.nii.gz")
         if not os.path.isfile(predicted_file):
-            logger.warning("No %s prediction for %s", code, record["input"])
+            # The case id, not the input's name: `p_003` is the scan's position
+            # in the batch and is also what nnUNet read and wrote, so the line
+            # is the more useful of the two AND carries no patient metadata.
+            logger.warning("No %s prediction for %s", code, case_id)
             continue
         array = sitk.GetArrayFromImage(sitk.ReadImage(predicted_file))
         masks[code] = (array > 0).astype(np.uint8)

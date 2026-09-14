@@ -1,6 +1,7 @@
 """GreedyReg, with greedy itself stubbed: no registration, everything around it."""
 
 import json
+import logging
 import os
 import sys
 
@@ -215,3 +216,63 @@ def test_a_failing_greedy_carries_its_own_message(monkeypatch):
 
     with pytest.raises(RuntimeError, match="images do not overlap"):
         pipeline.run_greedy(["-d", "3"])
+
+
+def test_a_batch_says_which_pair_it_is_on(tmp_path, stubbed, monkeypatch):
+    """One event per patient, rising, and the position rather than the key.
+
+    The patient key is derived from the caller's file names, so it is patient
+    metadata; a progress message is stored on the server and shown.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    for patient in ("A1", "B2"):
+        _scan(tmp_path / "t1" / f"{patient}_T1.nii.gz")
+        _scan(tmp_path / "t2" / f"{patient}_T2.nii.gz")
+
+    sadt_greedyreg.run(t1=tmp_path / "t1", t2=tmp_path / "t2",
+                       output_dir=tmp_path / "out")
+
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert [e["message"] for e in events] == ["patient 1 of 2", "patient 2 of 2"]
+    assert [e["fraction"] for e in events] == [0.0, 0.5]
+    assert not any("A1" in e["message"] for e in events)
+
+
+def test_a_failure_names_the_position_and_never_the_patient(
+    tmp_path, stubbed, monkeypatch, caplog
+):
+    """The counter in the log too, and here it matters more than in the bar.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log -- so a patient
+    key written on this path outlives the run and its job directory. The run
+    report keeps naming the pair; that goes back to whoever sent the data.
+
+    Asserted on the composed message: greedy's own stderr travels in the
+    exception, and what a third-party program prints is a separate exposure.
+    """
+    for patient in ("MAMP_0001", "MAMP_0002"):
+        _scan(tmp_path / "t1" / f"{patient}_T1.nii.gz")
+        _scan(tmp_path / "t2" / f"{patient}_T2.nii.gz")
+
+    stubbed_greedy = sadt_greedyreg.run_greedy
+
+    def fail_for_the_first_patient(command):
+        if any("MAMP_0001" in str(part) for part in command):
+            raise RuntimeError("greedy: images do not overlap")
+        return stubbed_greedy(command)
+
+    monkeypatch.setattr(sadt_greedyreg, "run_greedy", fail_for_the_first_patient)
+
+    with caplog.at_level(logging.INFO, logger="GreedyReg"):
+        sadt_greedyreg.run(t1=tmp_path / "t1", t2=tmp_path / "t2",
+                           output_dir=tmp_path / "out")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("GreedyReg failed on patient ") and m.endswith(" of 2")
+               for m in messages), messages
+    assert not any("MAMP_0001" in m for m in messages), messages
+
+    report = json.loads((tmp_path / "out" / "GreedyReg_report.json").read_text())
+    assert report["patients"]["MAMP_0001"]["status"] == "failed"

@@ -35,6 +35,13 @@ SHIFT_RANGE = 15.0
 # is inert in that mode -- upstream hid them for the same reason.
 BUTTERFLY_ONLY = {"patch": "Palate (butterfly)"}
 
+# The two modes that register. `reference` is REQUIRED in them -- run() refuses
+# without one -- and completely inert in "Patch", where the tool only shapes a
+# patch and registers nothing. So this is not an optional extra to file under
+# Advanced: it is a field that is either the point or meaningless, and the mode
+# already says which.
+REGISTERING_ONLY = {"mode": ["Register", "Patch and register"]}
+
 _RATIO = {
     # Two columns, so the four corners read as the 2x2 they are: left column one
     # side of the arch, right column the other, top row anterior. Where a pad
@@ -81,7 +88,9 @@ LAYOUT = {
         "y_label": "Shift (A-P)",
     },
     "surfaces": {"label": "Arches", "section": INPUT},
-    "reference": {"label": "Register onto", "section": INPUT},
+    "reference": {
+        "label": "Register onto", "section": INPUT, "visible_when": REGISTERING_ONLY,
+    },
     "mode": {"label": "What to do", "section": INPUT},
     "patch": {"label": "Register on", "section": INPUT},
     # Not rendered. The four teeth bound the patch and every arch uses the same

@@ -6,19 +6,49 @@ The pipeline is in pipeline.py; only `run` is public.
 from pathlib import Path
 from typing import Literal
 
-from .pipeline import segment_crowns
+from .errors import ToolInputError
+from .pipeline import array_name_for, segment_crowns
+
+# The DATA folder this tool's weights live in: its own name. Written rather
+# than derived, because which folder holds which bundle is a deployment fact
+# and a wrong guess is a directory that is simply not there.
+_DATA_NAME = "Crown_Seg"
+
+
+def _own_models(data_root):
+    """`<root>/Crown_Seg/models`, or a refusal a caller can act on.
+
+    `find_checkpoint` takes it from here: it already walks a folder and refuses
+    to choose between two vintages, so this only has to say WHICH folder.
+    """
+    if data_root is None:
+        raise ToolInputError(
+            "No 'model' given and no data root to look in. Name the checkpoint, "
+            "or run this through a server that publishes one."
+        )
+    return Path(data_root) / _DATA_NAME / "models"
 
 
 def run(
     meshes: Path,
-    model: Path,
     output_dir: Path,
-    array_name: str = "Universal_ID",
+    # After `output_dir` and optional, which is the shape that lets a neighbour
+    # ask for labelled crowns WITHOUT naming weights. Left required, the four
+    # supervised calls that omit it -- AREG IOS and IOSCBCT pass `crown_model
+    # or ""`, and that argument is optional on their own schemas -- died on
+    # `TypeError: run() missing 1 required positional argument: 'model'`.
+    # Empty means "my own", resolved below from this tool's data folder.
+    model: Path = "",
+    # Empty means "named after the numbering", which is the only default that
+    # cannot lie about what the array holds. See pipeline._ARRAY_NAMES.
+    array_name: str = "",
     suffix: str = "Seg",
     numbering: Literal["Universal", "FDI"] = "Universal",
     skip_segmented: bool = True,
     device: Literal["cuda", "cpu"] = "cuda",
     num_workers: int = 2,
+    *,
+    data_root=None,
 ) -> Path:
     """Label every tooth of an intraoral scan with its dental number.
 
@@ -32,10 +62,16 @@ def run(
             produced it, `<date>_val-loss<number>.pth`, and is found inside a
             folder however deeply it is filed. That is what lets a caller hand
             over a whole models directory without knowing where the file sits;
-            a folder holding two of them is refused, naming both.
+            a folder holding two of them is refused, naming both. Left empty,
+            this tool uses the checkpoint installed for it.
         output_dir: Where the labelled meshes are written, plus
             `run_report.json`. Nothing is written outside it.
         array_name: Name of the point-data array the labels are written to.
+            Left empty it follows `numbering` -- `Universal_ID` or `FDI_ID` --
+            so the name can never disagree with the integers underneath it.
+            Every tool that reads these meshes looks for the Universal spelling,
+            which is what makes an FDI mesh refused downstream rather than read
+            as a different set of teeth.
         suffix: Added to each output name, e.g. `arch_Seg.vtk`.
         numbering: Universal or FDI tooth numbering. This changes the integers
             written into the array, not the mesh, and whatever consumes the
@@ -61,9 +97,13 @@ def run(
     output_dir = Path(output_dir)
     segment_crowns(
         input_path=str(meshes),
-        model_path=str(model),
+        # Its OWN checkpoint when nobody named one. A caller that names one is
+        # pinning which weights ran and is obeyed; a caller that does not --
+        # a panel with no model field, a neighbour asking through the
+        # supervisor -- gets this tool's, found from this tool's data folder.
+        model_path=str(model or _own_models(data_root)),
         output_dir=str(output_dir),
-        array_name=array_name,
+        array_name=array_name or array_name_for(numbering),
         suffix=suffix,
         fdi=numbering == "FDI",
         skip_segmented=skip_segmented,

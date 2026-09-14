@@ -7,7 +7,7 @@ calls `run(**params)`; `scripts/describe.py` reads the same signature to publish
 the tool's JSON schema. Signature and schema therefore cannot drift.
 
 What this placeholder computes (intensity statistics over `.npy` arrays) is not
-the point and is meant to be deleted. The five rules it demonstrates are:
+the point and is meant to be deleted. The rules it demonstrates are:
 
 1. Stdlib annotations only -- `Path`, `str`, `int`, `float`, `bool`,
    `Literal[...]` and `list[...]` of those. describe.py refuses anything else
@@ -29,6 +29,12 @@ the point and is meant to be deleted. The five rules it demonstrates are:
    which is what the `ArgSpec.choices` it replaces used to do.
 7. Nothing here unpacks a `.zip`. The server unpacks archives before `run()`
    is called, so a tool always receives a real file or directory.
+8. A batch says where it is. `progress.py` appends one line per item to the
+   file the server names in `SADT_PROGRESS_FILE`, so a clinician watching a
+   forty-scan run sees "scan 14 of 40" instead of a spinner -- see
+   `pipeline.summarise`. Stdlib, best effort, and the message carries the
+   POSITION in the batch and never a file name: it is stored on the server and
+   shown, and a file name is patient metadata.
 """
 
 from pathlib import Path

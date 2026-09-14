@@ -522,8 +522,6 @@ def _predict_landmarks(
     straddling two of the landmark tool's regions, so asking by region would run
     58 agents to use 7 -- and one agent is a full two-scale walk of the volume.
     """
-    output_dir = os.path.join(work_dir, "landmarks")
-
     if sup is not None and hasattr(sup, "progress"):
         sup.progress(0.2, f"predicting landmarks with {LANDMARK_TOOL}")
 
@@ -532,10 +530,13 @@ def _predict_landmarks(
     # data folder, which meant ASO holding a name for its neighbour's storage.
     # `landmark_model` survives as an OVERRIDE: a caller pinning a bundle is
     # recording which weights ran, and is obeyed.
+    # No `output_dir`: where a supervised tool writes is the supervisor's, the
+    # same way it is the server's over HTTP. Pointing it into this run's scratch
+    # is what used to delete the predicted landmarks before anyone could ask to
+    # keep them -- `keep_intermediate` collects from the supervisor's own folder.
     produced = sup.run(
         LANDMARK_TOOL,
         input=centered_root,
-        output_dir=output_dir,
         landmarks=list(requested),
         prediction_ID="Pred",
         **({"model": landmark_model} if landmark_model else {}),
@@ -545,7 +546,12 @@ def _predict_landmarks(
     # outputs does not break the call.
     if isinstance(produced, dict):
         produced = next(iter(produced.values()))
-    return _collect(str(produced) if produced else output_dir)
+    if not produced:
+        raise ToolInputError(
+            "'{}' returned no output directory, so there are no predicted "
+            "landmarks to read.".format(LANDMARK_TOOL)
+        )
+    return _collect(str(produced))
 
 
 # A tool's own run report sits beside its results and is NOT a markups file --

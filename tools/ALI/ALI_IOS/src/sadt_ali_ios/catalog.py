@@ -29,9 +29,6 @@ UNIVERSAL_NUMBERS = {
     "Lower": {name: 18 + index for index, name in enumerate(LOWER_TEETH)},
 }
 
-# Landmark types, in the order the label tables below index them.
-TYPE_LM = ["O", "MB", "DB", "CL", "CB", "MG"]
-
 # Network -> the landmark types it predicts, mapped to the channel of its
 # output the type comes out on.
 NETWORKS = {

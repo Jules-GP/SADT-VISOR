@@ -1,6 +1,7 @@
 """CLIC, with the network stubbed: no GPU, no checkpoint, no card."""
 
 import json
+import logging
 import os
 import sys
 import types
@@ -132,3 +133,142 @@ def test_a_scan_with_no_detection_says_so(tmp_path, stubbed, monkeypatch):
     assert entry["status"] == "ok"
     assert entry["detections"] == 0
     assert "no detection" in entry["note"]
+
+
+def test_a_batch_says_where_it_has_got_to(tmp_path, stubbed, monkeypatch):
+    """One event per scan, rising, and the position rather than the name.
+
+    A forty-scan batch is one HTTP request that takes an hour; without this the
+    client can only show that the connection is still open. The file name stays
+    out of it: these messages are stored on the server and shown, and a file
+    name is patient metadata.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+    _write_scan(tmp_path / "in" / "two.nii.gz")
+
+    sadt_clic.run(scans=tmp_path / "in", model=tmp_path / "m.pth",
+                  output_dir=tmp_path / "out", device="cpu")
+
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert [e["message"] for e in events] == ["scan 1 of 2", "scan 2 of 2"]
+    assert [e["fraction"] for e in events] == [0.0, 0.5]
+
+
+def test_nothing_is_written_when_no_server_asked_for_progress(tmp_path, stubbed, monkeypatch):
+    """The variable is unset in a checkout and against an older server, and a
+    tool must not need a fallback path for that."""
+    monkeypatch.delenv("SADT_PROGRESS_FILE", raising=False)
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+
+    out = sadt_clic.run(scans=tmp_path / "in", model=tmp_path / "m.pth",
+                        output_dir=tmp_path / "out", device="cpu")
+
+    assert (out / "one_seg.nii.gz").exists()
+
+
+def test_a_failure_names_the_position_and_never_the_scan(tmp_path, stubbed, caplog):
+    """The rule the progress messages follow, applied to the log -- and this is
+    the line that needed it most.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log. Every one of
+    these `logger.exception` calls is on a failure path, so a name written here
+    is a patient identifier that outlives the run and its job directory.
+
+    Asserted on the composed message: an exception raised inside a third-party
+    loader can still name the file it could not open, and that is a separate
+    exposure this test does not claim to close.
+    """
+    _write_scan(tmp_path / "in" / "healthy.nii.gz")
+    (tmp_path / "in" / "Smith_John_T1.nii.gz").write_bytes(b"not a nifti")
+
+    with caplog.at_level(logging.INFO, logger="CLIC"):
+        sadt_clic.run(scans=tmp_path / "in", model=tmp_path / "m.pth",
+                      output_dir=tmp_path / "out", device="cpu")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("CLIC failed on scan ") and m.endswith(" of 2")
+               for m in messages), messages
+    assert not any("Smith_John" in m for m in messages), messages
+
+
+def test_the_report_names_the_classes(tmp_path, stubbed):
+    """The integers ARE the finding: buccal, bicortical or palatal decides the
+    surgical approach. Upstream recorded the mapping nowhere -- it painted a
+    legend over the slice views and wrote an unnamed volume."""
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+
+    out = sadt_clic.run(scans=tmp_path / "in", model=tmp_path / "m.pth",
+                        output_dir=tmp_path / "out", device="cpu")
+
+    report = json.loads((out / "CLIC_report.json").read_text())
+    assert report["labels"] == {"Buccal": 1, "Bicortical": 2, "Palatal": 3}
+    assert report["label_colors"]["Palatal"] == [0.6, 0.4, 0.2]
+    # The stub paints label 3, and what a reader wants is the word.
+    assert report["scans"][0]["detected"] == ["Palatal"]
+
+
+def test_a_checkpoint_of_another_shape_is_published_unnamed(tmp_path, stubbed, monkeypatch):
+    """A wrong table does not fail, it renames the finding -- and the finding
+    here is which surgical approach the canine calls for."""
+    monkeypatch.setattr(sadt_clic, "build_model", lambda path, device: (object(), 7))
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+
+    out = sadt_clic.run(scans=tmp_path / "in", model=tmp_path / "m.pth",
+                        output_dir=tmp_path / "out", device="cpu")
+
+    report = json.loads((out / "CLIC_report.json").read_text())
+    assert report["labels"] is None and report["label_colors"] is None
+    assert "7 classes" in report["labels_note"]
+    assert report["scans"][0]["labels_present"] == [3]
+    assert report["scans"][0]["detected"] == []
+
+
+def test_the_installed_checkpoint_is_used_when_none_is_named(tmp_path, stubbed):
+    """A panel left on "(automatic)" sends no model, and the tool finds its
+    own -- which is what stops a caller from naming its neighbour's weights."""
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+    models = tmp_path / "data" / "CLIC" / "models"
+    models.mkdir(parents=True)
+    (models / "final_model.pth").write_bytes(b"weights")
+
+    out = sadt_clic.run(scans=tmp_path / "in", output_dir=tmp_path / "out",
+                        device="cpu", data_root=tmp_path / "data")
+
+    report = json.loads((out / "CLIC_report.json").read_text())
+    assert report["model"] == "final_model.pth"
+
+
+def test_several_installed_checkpoints_and_no_name_is_refused(tmp_path, stubbed):
+    """Upstream took the alphabetically FIRST `.pth`, so which model vintage ran
+    depended on file names. Refusing names both instead."""
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+    models = tmp_path / "data" / "CLIC" / "models"
+    models.mkdir(parents=True)
+    (models / "final_model.pth").write_bytes(b"weights")
+    (models / "older_model.pth").write_bytes(b"weights")
+
+    with pytest.raises(ValueError, match="final_model.pth, older_model.pth"):
+        sadt_clic.run(scans=tmp_path / "in", output_dir=tmp_path / "out",
+                      device="cpu", data_root=tmp_path / "data")
+
+
+def test_no_checkpoint_installed_names_the_command_that_fetches_one(tmp_path, stubbed):
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+    (tmp_path / "data" / "CLIC" / "models").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="setup-models.sh --tool CLIC"):
+        sadt_clic.run(scans=tmp_path / "in", output_dir=tmp_path / "out",
+                      device="cpu", data_root=tmp_path / "data")
+
+
+def test_no_model_and_no_data_root_says_which_of_the_two_is_missing(tmp_path, stubbed):
+    """A checkout running this by hand, rather than a server that publishes a
+    data root."""
+    _write_scan(tmp_path / "in" / "one.nii.gz")
+
+    with pytest.raises(ValueError, match="no data root"):
+        sadt_clic.run(scans=tmp_path / "in", output_dir=tmp_path / "out",
+                      device="cpu")

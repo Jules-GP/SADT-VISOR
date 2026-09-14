@@ -53,10 +53,36 @@ SURFACE_EXTENSIONS = (".vtk", ".stl")
 # Point-data array names that already carry per-tooth labels. A mesh holding
 # any of them is segmented and is passed through untouched -- re-running the
 # network on it would cost minutes and change nothing.
-LABEL_ARRAY_NAMES = ("PredictedID", "UniversalID", "Universal_ID")
+LABEL_ARRAY_NAMES = ("PredictedID", "UniversalID", "Universal_ID", "FDI_ID")
 
 DEFAULT_ARRAY_NAME = "Universal_ID"
+FDI_ARRAY_NAME = "FDI_ID"
 DEFAULT_SUFFIX = "Seg"
+
+# The array a run writes to, named after the numbering that went into it.
+#
+# **The name has to follow the values, and this is not tidiness.** shapeaxi's
+# `ConvertFDI` converts the integers in place and writes them back under the
+# SAME array name, so asking for FDI used to produce an array literally called
+# `Universal_ID` holding FDI numbers. The two systems overlap across almost
+# their whole range -- Universal 1..32 against FDI 11..18, 21..28, 31..38,
+# 41..48 -- so a consumer reading that array does not fail, it reads a
+# different tooth: FDI 18 is the upper right third molar where Universal 18 is
+# the lower left second molar, and FDI 33 (lower left canine) is the value
+# shapeaxi reserves for GUM in Universal.
+#
+# Naming the FDI array differently is what turns that into a refusal. Every
+# tool that consumes these meshes -- ALI's IOS landmarks, ASO, AREG and
+# FlexReg -- looks for `Universal_ID`, `PredictedID` or `UniversalID`, so an
+# FDI mesh now carries no name they know and they say so, instead of
+# registering a patient onto the wrong teeth. That is the right answer: none of
+# them speaks FDI, and every legacy caller passed `fdi: 0`.
+_ARRAY_NAMES = {"Universal": DEFAULT_ARRAY_NAME, "FDI": FDI_ARRAY_NAME}
+
+
+def array_name_for(numbering: str) -> str:
+    """The array name that goes with a numbering system."""
+    return _ARRAY_NAMES.get(numbering, DEFAULT_ARRAY_NAME)
 
 WORK_DIRNAME = ".crownseg_work"
 

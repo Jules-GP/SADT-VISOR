@@ -79,13 +79,24 @@ class FakeSup:
         self.outputs = outputs or {}
         self.calls = []
         self.messages = []
+        self.call_index = 0
 
     def run(self, tool, **params):
         self.calls.append((tool, params))
         maker = self.outputs.get(tool)
         if maker is None:
             raise AssertionError(f"nothing planted for {tool!r} in this test")
-        return Path(maker(params))
+        # The SUPERVISOR owns where a callee writes, exactly as the server owns
+        # it for a request: the caller passes no `output_dir` and reads the path
+        # back off the return value. Modelled here, because a fake that let the
+        # caller name the directory would accept a caller that named one.
+        assert "output_dir" not in params, (
+            "a caller must not name where a supervised tool writes"
+        )
+        self.call_index += 1
+        nested = self.tmp / "sup" / f"{self.call_index:02d}_{tool}" / "output"
+        nested.mkdir(parents=True, exist_ok=True)
+        return Path(maker(dict(params, output_dir=str(nested))))
 
     def progress(self, fraction, message):
         self.messages.append((fraction, message))

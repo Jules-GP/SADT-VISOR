@@ -151,8 +151,6 @@ MODELS = {
     )
 }
 
-MODEL_NAMES = tuple(MODELS)
-
 
 def get(name: str) -> Model:
     """The model a bundle name identifies. Raises KeyError for an unknown one;

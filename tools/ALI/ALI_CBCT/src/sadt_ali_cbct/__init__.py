@@ -37,8 +37,13 @@ def _own_models(data_root):
 
 def run(
     input: Path,
-    model: Path,
     output_dir: Path,
+    # After `output_dir` and optional, which is the shape that lets a neighbour
+    # ask for landmarks WITHOUT naming weights. Left required, a supervised call
+    # omitting it died on `TypeError: run() missing 1 required positional
+    # argument: 'model'` -- the same failure AREG's four supervised calls show.
+    # Empty means "my own", resolved below from this tool's data folder.
+    model: Path = "",
     # Spelled out because `Literal` takes literals only -- it cannot be built
     # from catalog.REGION_NAMES. That makes this a second declaration of the
     # same set, which is the thing this contract otherwise avoids, so a test

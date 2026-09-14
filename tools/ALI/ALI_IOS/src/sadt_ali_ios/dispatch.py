@@ -222,11 +222,14 @@ def _segment(sup, meshes: list, model_path: str, device: str, work_dir: str) -> 
     for path, key in meshes:
         _stage(path, os.path.join(staged_root, key))
 
+    # No `output_dir`: where a supervised tool writes is the supervisor's, the
+    # same way it is the server's over HTTP. Pointing it into this run's scratch
+    # is what used to delete the labelled meshes before anyone could ask to keep
+    # them -- `keep_intermediate` collects from the supervisor's own folder.
     produced = sup.run(
         CROWN_TOOL,
         meshes=staged_root,
         model=model_path,
-        output_dir=os.path.join(work_dir, CROWN_TOOL),
         # This deployment's device, not Crown_Seg's own default: a CPU-only
         # server would otherwise have every supervised call ask for CUDA and
         # fall back with a warning.

@@ -27,15 +27,22 @@ _OUTPUTS = "Outputs"
 
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
 _IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
-# The bundle the landmark tool runs with, and it only runs in Fully-Automated:
-# Semi-Automated registers on landmarks the caller already has. Shown in both,
-# it reads as a model the semi-automated run silently ignores.
-_CBCT_PREDICTED = {
-    "modality": catalogs.MODALITY_CBCT,
-    "automation": catalogs.AUTOMATION_FULLY,
-}
-
 LAYOUT = {
+    # Injected by the server for any tool that calls another, so it is not in
+    # run()'s signature -- see describe.INJECTED_ARGUMENTS. Named here because
+    # "intermediate results" says nothing to a clinician: what this chain
+    # produces on the way is ALI's raw prediction, before ASO moves it.
+    # Injected by the server for any tool that calls another, so it is not in
+    # run()'s signature -- see describe.INJECTED_ARGUMENTS. The options are the
+    # steps themselves; only the wording is this tool's to give.
+    "keep_intermediate": {
+        "label": "Steps to keep",
+        "option_help": {
+            "ALI_CBCT": "The landmarks the prediction placed, before this tool "
+                        "oriented them -- what to look at when an orientation "
+                        "comes out wrong.",
+        },
+    },
     "input": {"section": _INPUTS, "label": "Scan / Landmark Folder"},
     # Chosen by what the selection needs, not by the clinician (see
     # dispatch.choose_reference). The original extension asked for a FOLDER on

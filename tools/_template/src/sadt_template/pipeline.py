@@ -8,6 +8,8 @@ import inside `summarise`.
 
 from pathlib import Path
 
+from . import progress
+
 SUFFIX = ".npy"
 
 METRICS = {
@@ -77,7 +79,13 @@ def summarise(
 
     rows = []
     pooled = []
-    for scan in iter_scans(scans):
+    # Copied into every tool, like `iter_scans` above and for the same reason.
+    # `report` is one line appended to the file the server named, and it is the
+    # difference between a clinician seeing "scan 14 of 40" and seeing nothing
+    # for an hour. The counter travels, the file name never does.
+    found = iter_scans(scans)
+    for index, scan in enumerate(found, start=1):
+        progress.report(index, len(found), "scan")
         values = np.load(scan).ravel()
         kept = values[values > threshold]
         row = {"scan": scan.name, "voxels": int(kept.size)}

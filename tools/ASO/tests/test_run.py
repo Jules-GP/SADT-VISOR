@@ -719,6 +719,7 @@ class FakeSup:
         self.tmp = tmp_path
         self.calls = []
         self.messages = []
+        self.call_index = 0
 
     def run(self, tool, **params):
         # The input is captured HERE, not after the run: it lives in the
@@ -731,14 +732,22 @@ class FakeSup:
             for root, _dirs, files in os.walk(str(params["input"]))
             for name in sorted(files)
         ]
-        output_dir = params["output_dir"]
+        # The SUPERVISOR owns where a callee writes, exactly as the server owns
+        # it for a request: the caller passes no `output_dir` and reads the path
+        # back off the return value. Modelled here because a fake that let the
+        # caller name the directory would pass whatever the caller did.
+        self.call_index += 1
+        output_dir = os.path.join(
+            str(self.tmp), "sup", f"{self.call_index:02d}_{tool}", "output"
+        )
+        os.makedirs(output_dir, exist_ok=True)
         for key, landmarks in self.predictions.items():
             markups.write_landmarks(
-                landmarks, os.path.join(str(output_dir), f"{key}_lm_Pred.mrk.json")
+                landmarks, os.path.join(output_dir, f"{key}_lm_Pred.mrk.json")
             )
         from pathlib import Path
 
-        return Path(str(output_dir))
+        return Path(output_dir)
 
     def progress(self, fraction, message):
         self.messages.append((fraction, message))
@@ -1775,3 +1784,58 @@ def test_a_patient_with_landmarks_is_never_predicted_for(tmp_path):
              modality="CBCT", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup)
 
     assert not getattr(sup, "calls", []), "landmarks already on disk were predicted again"
+
+
+def test_written_landmarks_are_drawn_when_slicer_opens_them(tmp_path):
+    """The markups DISPLAY node must be on, not just each control point.
+
+    `false` on the display node switches the whole node off: Slicer loads the
+    file, builds the node, lists it in the Markups module -- and draws nothing,
+    with no error to explain it. Both original CLIs wrote `false`, and it went
+    unnoticed inside the old Slicer module because that module loaded the nodes
+    itself and could switch them back on. A returned archive has no such panel:
+    the file is opened as it was written.
+
+    Pinned here because nothing pinned it, which is exactly why it shipped. ALI
+    carries the same rule in its own writer.
+    """
+    path = markups.write_landmarks(
+        {"Ba": (1.0, 2.0, 3.0), "N": (4.0, 5.0, 6.0)},
+        str(tmp_path / "P1_lm_Or.mrk.json"),
+    )
+    node = json.loads(Path(path).read_text())["markups"][0]
+
+    assert node["display"]["visibility"] is True, (
+        "the display node is off, so nothing is drawn however visible the points are"
+    )
+    assert all(point["visibility"] is True for point in node["controlPoints"])
+
+
+def test_landmarks_rewritten_from_a_callers_file_are_drawn_too(tmp_path):
+    """`rewrite_landmarks` keeps the caller's own display settings -- their
+    colours, their glyph sizes -- and that is right for every field but one.
+
+    `visibility` on the display node decides whether anything is drawn at all.
+    Every file this tool wrote before that was fixed carries `false`, so a
+    caller feeding one back in got an invisible result and no way to tell it
+    from a run that placed nothing.
+    """
+    template = tmp_path / "given.mrk.json"
+    template.write_text(json.dumps({
+        "markups": [{
+            "type": "Fiducial",
+            "display": {"visibility": False, "color": [1.0, 0.0, 0.0]},
+            "controlPoints": [
+                {"label": "Ba", "position": [0.0, 0.0, 0.0], "visibility": True},
+            ],
+        }]
+    }))
+
+    path = markups.rewrite_landmarks(
+        {"Ba": (1.0, 2.0, 3.0)}, str(template), str(tmp_path / "out.mrk.json"))
+    node = json.loads(Path(path).read_text())["markups"][0]
+
+    assert node["display"]["visibility"] is True
+    assert node["display"]["color"] == [1.0, 0.0, 0.0], (
+        "the caller's own colour is theirs to keep"
+    )
