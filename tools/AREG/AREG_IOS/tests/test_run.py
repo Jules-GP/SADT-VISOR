@@ -830,3 +830,81 @@ class TestArgumentRules:
                     mgl_landmarks="/nonexistent/landmarks",
                     mgl_patch_height=-1.0,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Progress -- the cohort loop, and the channel it does NOT use
+# ---------------------------------------------------------------------------
+
+def _events(path) -> list:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+
+
+def test_the_cohort_loop_reports_one_event_per_subject(tmp_path, monkeypatch):
+    """One event per subject, the fraction rising, and no name in any message.
+
+    The subject key is built from the file names the caller sent, so it is
+    patient metadata: what travels is the position in the batch.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    for subject in ("P1", "P2"):
+        for timepoint in ("T1", "T2"):
+            surfaces.write_surface(
+                _grid_mesh(),
+                str(tmp_path / timepoint / f"{subject}_{timepoint}_Lower.vtk"),
+            )
+    landmark_root = tmp_path / "mgl"
+    landmark_root.mkdir()
+    # The band is painted deterministically instead of walked from landmarks;
+    # the loop around it, which is what reports, runs for real.
+    monkeypatch.setattr(
+        ios_pipeline, "MGLPainter", lambda root, height: _StubPainter("Bottom_MGL")
+    )
+
+    dispatch.register(
+        t1_path=str(tmp_path / "T1"),
+        t2_path=str(tmp_path / "T2"),
+        automation=catalogs.AUTOMATION_SEMI,
+        ios_patch=catalogs.PATCH_MGL,
+        mgl_landmarks_path=str(landmark_root),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    events = _events(events_file)
+    assert [event["message"] for event in events] == ["subject 1 of 2", "subject 2 of 2"]
+    assert [event["fraction"] for event in events] == [0.0, 0.5]
+    assert not any("P1" in event["message"] for event in events)
+
+
+def test_progress_does_not_travel_through_the_supervisor(tmp_path, monkeypatch):
+    """`FakeSup.messages` records everything a tool sends through a supervisor.
+
+    This tool sends none of its progress that way, and that is the design: only
+    four of the fifteen tools take a supervisor at all, so the channel has to be
+    one the other eleven can use. The environment variable is that channel.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    for timepoint in ("T1", "T2"):
+        surfaces.write_surface(
+            _grid_mesh(), str(tmp_path / timepoint / f"P1_{timepoint}_Lower.vtk")
+        )
+    (tmp_path / "mgl").mkdir()
+    monkeypatch.setattr(
+        ios_pipeline, "MGLPainter", lambda root, height: _StubPainter("Bottom_MGL")
+    )
+    sup = FakeSup(tmp_path)
+
+    dispatch.register(
+        t1_path=str(tmp_path / "T1"),
+        t2_path=str(tmp_path / "T2"),
+        automation=catalogs.AUTOMATION_SEMI,
+        ios_patch=catalogs.PATCH_MGL,
+        mgl_landmarks_path=str(tmp_path / "mgl"),
+        output_dir=str(tmp_path / "out"),
+        sup=sup,
+    )
+
+    assert sup.messages == []
+    assert [event["message"] for event in _events(events_file)] == ["subject 1 of 1"]

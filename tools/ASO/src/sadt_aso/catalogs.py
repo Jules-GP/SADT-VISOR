@@ -108,8 +108,6 @@ IOS_LANDMARK_TYPE_CHOICES = {
 # ---------------------------------------------------------------------------
 # Jaws and occlusion
 # ---------------------------------------------------------------------------
-JAWS = ("Upper", "Lower")
-
 JAW_CHOICES = {"Upper": True, "Lower": True}
 
 # One argument with three states, replacing two that could contradict each

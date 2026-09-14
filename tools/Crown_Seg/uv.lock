@@ -1949,8 +1949,8 @@ dependencies = [
     { name = "iopath" },
 ]
 wheels = [
-    { url = "https://imagemindanalytics.github.io/pytorch3d-wheels/simple/pytorch3d/pytorch3d-0.7.9+pt2110cu128-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:be2007afd5fba1872f9ab13146c107ee285ddab1a3310f64abd27c7889786905" },
-    { url = "https://imagemindanalytics.github.io/pytorch3d-wheels/simple/pytorch3d/pytorch3d-0.7.9+pt2110cu128-cp311-cp311-win_amd64.whl", hash = "sha256:4d268d9622deca60736c4ad80c8c3a8c1a9e0e9274015d08b7f96bc4a747bc67" },
+    { url = "https://imagemindanalytics.github.io/pytorch3d-wheels/simple/pytorch3d/pytorch3d-0.7.9+pt2110cu128-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:db9f4c92fb1e76b5b80e775dfd31cb243bd6b5ed010d454b9372422ede56e6c2" },
+    { url = "https://imagemindanalytics.github.io/pytorch3d-wheels/simple/pytorch3d/pytorch3d-0.7.9+pt2110cu128-cp311-cp311-win_amd64.whl", hash = "sha256:5a51dd12adfa78689bef8881fa5d630151ed327462e104f950f6a1d4b79a5771" },
 ]
 
 [[package]]

@@ -31,6 +31,7 @@ from .errors import ToolInputError, ToolUnavailableError
 from sadt_ali_common.markups import MARKUPS_EXTENSION
 from sadt_ali_common.markups import write as write_markups
 from . import catalog
+from . import progress
 from . import render, surface
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,8 @@ def discover_weights(model_path: str):
 
     weights: dict = {}
     unrecognized = []
+    # Where each (network, jaw) was found -- see the collision check below.
+    seen: dict = {}
 
     for root, _dirs, files in os.walk(model_path):
         for name in sorted(files):
@@ -104,6 +107,19 @@ def discover_weights(model_path: str):
             if network is None or jaw is None:
                 unrecognized.append(name)
                 continue
+            where = os.path.relpath(root, model_path)
+            if (network, jaw) in seen:
+                # Two bundles under one folder. The assignment below used to let
+                # the second silently overwrite the first, so a run could mix two
+                # vintages with nothing in the report to say which. Relative
+                # paths: this message reaches the client verbatim.
+                raise ToolInputError(
+                    "This model folder holds more than one bundle: {} weights for "
+                    "the {} jaw are in both '{}' and '{}'. Point 'model' at one of "
+                    "them -- choosing here would leave which weights ran "
+                    "unrecorded.".format(network, jaw.lower(), seen[(network, jaw)], where)
+                )
+            seen[(network, jaw)] = where
             weights.setdefault(network, {})[jaw] = os.path.join(root, name)
 
     return weights, sorted(unrecognized)
@@ -568,7 +584,9 @@ def predict_landmarks(
         scan_reports[key] = record
         scan_started = time.monotonic()
         # Position in the batch, never the mesh's name -- see the CBCT engine.
+        # The progress event carries the same counter, for the same reason.
         logger.info("mesh %d/%d: reading and scaling", mesh_index, len(meshes))
+        progress.report(mesh_index, len(meshes), "mesh")
 
         try:
             _predict_one_scan(
@@ -614,6 +632,14 @@ def predict_landmarks(
     return {
         "mode": "IOS",
         "device": device,
+        # The bundle the weights CAME FROM, not the argument that was passed.
+        # The server hands a hosted-model argument the whole of
+        # `DATA/<tool>/models/` when the caller names no bundle, so the
+        # argument's own basename is "models" -- which is exactly what this
+        # field exists not to say. Taken from a checkpoint that was actually
+        # loaded, so it names the weights that ran even when nobody chose them.
+        "model_bundle": os.path.basename(os.path.dirname(next(
+            path for jaws in weights.values() for path in jaws.values()))),
         "prediction_ID": prediction_ID,
         "networks": [catalog.NETWORK_DISPLAY_NAMES.get(code, code) for code in available],
         # Same meaning as the CBCT engine's list, and read by the same client

@@ -15,12 +15,35 @@ from pathlib import Path
 from typing import Literal
 
 from .dispatch import identify
+from .errors import ToolInputError
+
+
+# The DATA folder this tool's weights live in. Its own name, except that
+# ALI_CBCT and ALI_IOS are two engines behind the ALI facade and share one.
+# Written rather than derived: which is which is a deployment fact, and a wrong
+# guess is a folder that is simply not there.
+_DATA_NAME = "ALI"
+
+
+def _own_models(data_root):
+    """`<root>/ALI/models`, or a refusal a caller can act on."""
+    if data_root is None:
+        raise ToolInputError(
+            "No 'model' given and no data root to look in. Name the model "
+            "bundle, or run this through a server that publishes one."
+        )
+    return Path(data_root) / _DATA_NAME / "models"
 
 
 def run(
     input: Path,
-    model: Path,
     output_dir: Path,
+    # After `output_dir` and optional, which is the shape that lets a neighbour
+    # ask for landmarks WITHOUT naming weights. Left required, a supervised call
+    # omitting it died on `TypeError: run() missing 1 required positional
+    # argument: 'model'` -- the same failure AREG's four supervised calls show.
+    # Empty means "my own", resolved below from this tool's data folder.
+    model: Path = "",
     # Spelled out because `Literal` takes literals only -- it cannot be built
     # from catalog.REGION_NAMES. That makes this a second declaration of the
     # same set, which is the thing this contract otherwise avoids, so a test
@@ -49,6 +72,8 @@ def run(
     device: Literal["cuda", "cpu"] = "cuda",
     search_seconds: float = 0.0,
     seed: int = 0,
+    *,
+    data_root=None,
 ) -> Path:
     """Place anatomical landmarks on a CBCT scan.
 
@@ -93,7 +118,13 @@ def run(
     output_dir = Path(output_dir)
     identify(
         input_path=str(input),
-        model_path=str(model),
+        # Its OWN bundle when nobody named one. A caller that names a bundle is
+        # pinning which weights ran and is obeyed; a caller that does not --
+        # a neighbour asking through the supervisor for landmarks, say -- gets
+        # this tool's, found from this tool's own data folder. Composing that
+        # path was the CALLER's job until now, which meant ASO holding a name
+        # for ALI's storage and a copy of its weights beside its own.
+        model_path=str(model or _own_models(data_root)),
         output_dir=str(output_dir),
         regions=regions,
         landmarks=landmarks,

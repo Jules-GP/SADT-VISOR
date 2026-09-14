@@ -38,7 +38,7 @@ from pathlib import Path
 import shutil
 import time
 
-from . import catalogs, nnunet_runner
+from . import catalogs, nnunet_runner, progress
 from .errors import ToolInputError
 from .scans import SCAN_EXTENSIONS, compressed_extension, split_scan_extension
 
@@ -262,7 +262,12 @@ def segment(
 
     cases = {}
     failed_conversions = []
+    # Only the two ends of this run can be counted. The segmentation between
+    # them is ONE nnUNet call over the whole folder, so there is no per-scan
+    # position to report inside it -- the bar stops where the reading ends and
+    # moves again when the writing starts, rather than inventing a number.
     for index, scan in enumerate(scans):
+        progress.report(index + 1, len(scans), "reading scan", end=0.1)
         case_id = f"case_{index:04d}"
         try:
             _convert_to_nifti(scan, os.path.join(nnunet_input, f"{case_id}{_NNUNET_SUFFIX}"))
@@ -289,6 +294,7 @@ def segment(
         )
 
     logger.info("BatchDentalSeg: %d scan(s), model=%s, device=%s", len(cases), model.name, device)
+    progress.emit(0.1, f"segmenting {len(cases)} scan(s) in one pass")
     try:
         nnunet_runner.predict_folder(
             model_folder, nnunet_input, nnunet_output, device, tile_step_size=tile_step_size
@@ -298,7 +304,8 @@ def segment(
         raise
 
     report_scans = list(failed_conversions)
-    for case_id, scan in cases.items():
+    for index, (case_id, scan) in enumerate(cases.items(), start=1):
+        progress.report(index, len(cases), "writing scan", start=0.9)
         entry = {"case_id": case_id, "input": _describe(scan)}
         predicted = os.path.join(nnunet_output, f"{case_id}.nii.gz")
         if not os.path.isfile(predicted):

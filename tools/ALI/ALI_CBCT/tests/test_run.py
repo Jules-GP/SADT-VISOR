@@ -1167,3 +1167,76 @@ def test_a_seed_outside_the_accepted_range_is_an_input_error(
                 regions=CRANIAL_BASE_ONLY,
                 seed=bad,
             )
+
+
+def test_a_batch_says_which_scan_it_is_on(tmp_path, stub_agent, cbct_environment, monkeypatch):
+    """One event per scan, rising, and the position rather than the name.
+
+    Both scans here are called `patient01.nii.gz` -- the very case the output
+    tree exists to keep apart -- so the name would identify neither the patient
+    nor the position, and it is patient metadata besides. The log line beside
+    this call has said so since the port; the progress message obeys the same
+    rule because it is stored on the server and shown to a watcher.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    write_volume(tmp_path / "cohort" / "siteA" / "patient01.nii.gz")
+    write_volume(tmp_path / "cohort" / "siteB" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        regions=CRANIAL_BASE_ONLY,
+    )
+
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert [event["message"] for event in events] == ["scan 1 of 2", "scan 2 of 2"]
+    assert [event["fraction"] for event in events] == [0.0, 0.5]
+    assert not any("patient01" in event["message"] for event in events)
+
+
+def test_every_description_is_sourced_or_absent():
+    """A landmark with no line shows no tooltip, which is what it had before.
+    A landmark with a WRONG line is a point placed wrongly, so the table covers
+    only what Gillot et al. 2023 Table 1 reaches."""
+    from sadt_ali_cbct import catalog
+
+    offered = {label for labels in catalog.GROUP_LABELS.values() for label in labels}
+    assert set(catalog.DESCRIPTIONS) <= offered
+    assert all(text.strip() for text in catalog.DESCRIPTIONS.values())
+    # The three suffixes the paper does not define stay undescribed.
+    assert not [label for label in catalog.DESCRIPTIONS
+                if label.endswith(("MP", "OIP", "RIP"))]
+
+
+def test_a_suffix_reads_differently_along_the_arch():
+    """`O` is an incisal edge on an incisor and a cusp tip from the canine
+    back; `R` is a root canal on anything anterior and a pulp chamber floor on
+    a molar. The two do not change at the same tooth."""
+    from sadt_ali_cbct import catalog
+
+    assert "incisal edge" in catalog.DESCRIPTIONS["UR1O"]
+    assert "cusp tip" in catalog.DESCRIPTIONS["UL3O"]
+    assert "root canal" in catalog.DESCRIPTIONS["UR3R"]
+    assert "pulp chamber" in catalog.DESCRIPTIONS["UR6R"]
+
+
+def test_the_words_travel_with_the_argument():
+    from sadt_ali_cbct import catalog, layout
+
+    assert layout.LAYOUT["landmarks"]["option_help"] is catalog.DESCRIPTIONS
+
+
+def test_the_frankfort_horizontal_points_are_named():
+    """ASO registers on `Ba, S, N, RPo, LPo, ROr, LOr` and publishes that
+    reference as "Frankfurt Horizontal + Midsagittal" -- a plane defined by
+    porion and orbitale. The reference's own name is what identifies them, so
+    the seven landmarks a clinician meets most often all carry a line."""
+    from sadt_ali_cbct import catalog
+
+    for label in ("Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"):
+        assert label in catalog.DESCRIPTIONS, label
+    assert "porion" in catalog.DESCRIPTIONS["RPo"].lower()
+    assert "orbitale" in catalog.DESCRIPTIONS["LOr"].lower()

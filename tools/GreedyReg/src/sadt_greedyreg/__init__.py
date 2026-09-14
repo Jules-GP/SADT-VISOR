@@ -11,6 +11,7 @@ from typing import Literal
 
 from sadt_areg_common import pairing
 
+from . import progress
 from .pipeline import (
     binarise_mask,
     registration_command,
@@ -28,6 +29,11 @@ def run(
     t1: Path,
     t2: Path,
     output_dir: Path,
+    # Straight after the two folders they belong with: sections are published
+    # in the order the signature first mentions them, so declaring the two
+    # optional INPUTS here puts the collapsed "Advanced" bar under T1 and T2
+    # rather than at the foot of the panel, three sections away from the things
+    # it holds more of.
     masks: Path = "",
     initial_transforms: Path = "",
     metric: Literal["NCC", "NMI", "SSD"] = "NCC",
@@ -37,17 +43,33 @@ def run(
     """Register each patient's second CBCT onto their first, with Greedy.
 
     Args:
-        t1: Folder of first-timepoint scans -- the fixed images.
-        t2: Folder of second-timepoint scans -- the moving images. Patients are
-            paired with T1 by name.
+        t1: Folder of first-timepoint scans -- the FIXED images, the frame
+            everything is brought into.
+        t2: Folder of second-timepoint scans -- the MOVING images, the ones
+            that get resampled. A patient is paired with their T1 by name, up
+            to the timepoint token: `P1_T1_scan.nii.gz` pairs with
+            `P1_T2.nii.gz`. Anyone present in only one folder is reported
+            rather than dropped.
         output_dir: Where the registered volumes and transforms are written.
-        masks: Optional folder of masks, one per patient. The registration
-            metric is then computed inside the mask only.
-        initial_transforms: Optional folder of `.mat` transforms to start from,
-            one per patient. Without one, the search starts from identity.
-        metric: What the registration optimises. NCC is windowed 4x4x4.
-        transform_type: Rigid is 6 degrees of freedom, Affine is 12.
+        masks: One mask per patient, and the metric is then computed inside it
+            only. This is how a growing patient is registered on what has NOT
+            changed -- the cranial base, typically, which AMASSS segments. The
+            mask belongs to the T1 scan, since T1 is the fixed image.
+        metric: What the registration optimises. NCC compares local patterns in
+            a 4x4x4 window and is the one to keep for two CBCTs of one patient.
+            NMI compares the two intensity distributions instead, which is what
+            to reach for when the scans were acquired differently enough that
+            their grey values no longer correspond. SSD compares voxel values
+            directly and needs them on the same scale.
+        transform_type: Rigid moves and rotates and nothing else, 6 degrees of
+            freedom. Affine adds scaling and shear, 12. For two timepoints of
+            one patient rigid is almost always what is wanted: affine can
+            absorb real growth into the transform, and that growth is the thing
+            a longitudinal study is measuring.
         output_suffix: Appended to each patient's name in the output.
+        initial_transforms: A `.mat` transform per patient to start the search
+            from, for two timepoints too far apart for the search to find each
+            other on its own. Without one the search starts from identity.
 
     Returns:
         The output directory, holding `<patient>_<suffix>.nii.gz`,
@@ -85,7 +107,10 @@ def run(
     init_by_patient = _discover_transforms(str(initial_transforms)) if initial_transforms else {}
 
     registered = 0
-    for patient, files in matched.matched.items():
+    for index, (patient, files) in enumerate(matched.matched.items(), start=1):
+        # The counter, never the patient key: the key comes from the caller's
+        # file names, and a progress message is stored and shown.
+        progress.report(index, len(matched.matched), "patient")
         fixed, moving = files["t1"], files["t2"]
         entry = {"t1": os.path.basename(fixed), "t2": os.path.basename(moving)}
         scratch = tempfile.mkdtemp(prefix=f"greedyreg_{patient}_")
@@ -99,8 +124,12 @@ def run(
         except Exception as exc:
             # Upstream called sys.exit(1) here, so patient 3 failing lost
             # patients 4 to 40 -- and the batch reported nothing about any of
-            # them. One patient failing costs one patient.
-            logger.exception("GreedyReg failed on %s", patient)
+            # them. One patient failing costs one patient. The counter again,
+            # and for a sharper reason than the progress call above: a failed
+            # run's stderr is copied into the server's own persistent log.
+            logger.exception(
+                "GreedyReg failed on patient %d of %d", index, len(matched.matched)
+            )
             entry["status"] = "failed"
             entry["reason"] = f"{type(exc).__name__}: {exc}"
         finally:

@@ -14,7 +14,7 @@ data in git, ever.
 import numpy as np
 import pytest
 
-from sadt_template import run
+from sadt_template import progress, run
 from sadt_template.pipeline import ToolInputError
 
 
@@ -107,3 +107,79 @@ def test_an_option_outside_the_published_set_is_refused(scans, tmp_path):
     """
     with pytest.raises(ToolInputError, match="Unknown reduction"):
         run(scans=scans, output_dir=tmp_path / "out", reduction="median")
+
+
+# ---------------------------------------------------------------------------
+# Progress -- the channel a cohort loop reports on
+# ---------------------------------------------------------------------------
+
+def _events(path):
+    """Every event written so far, parsed. One JSON object per line."""
+    import json
+
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def test_progress_is_silent_when_no_server_asked_for_it(monkeypatch, capsys):
+    """The variable is unset in a checkout and in every other test in this file.
+
+    Nothing may be written, nothing printed, and nothing raised -- which is
+    what lets a tool call `report` unconditionally instead of guarding it.
+    """
+    monkeypatch.delenv(progress.VARIABLE, raising=False)
+
+    progress.report(1, 10, "scan")
+    progress.emit(None, "anything")
+
+    assert capsys.readouterr() == ("", "")
+
+
+def test_one_well_formed_line_per_event(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv(progress.VARIABLE, str(events_file))
+
+    progress.report(14, 40, "scan")
+    progress.emit(None, "an opaque phase")
+
+    events = _events(events_file)
+    assert events[0] == {"fraction": 0.325, "message": "scan 14 of 40"}
+    # None, not a number: the honest answer where the tool cannot see inside.
+    assert events[1] == {"fraction": None, "message": "an opaque phase"}
+
+
+def test_a_message_is_truncated_to_what_the_server_keeps(tmp_path, monkeypatch):
+    """Under PIPE_BUF, below which POSIX makes an O_APPEND write atomic -- which
+    is what stops a supervised chain's events from interleaving."""
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv(progress.VARIABLE, str(events_file))
+
+    progress.emit(0.5, "x" * 5000)
+
+    line = events_file.read_bytes()
+    assert len(line) < progress.PIPE_BUF
+    assert _events(events_file)[0]["message"] == "x" * progress.MAX_MESSAGE
+
+
+def test_a_failure_to_report_never_reaches_the_tool(tmp_path, monkeypatch):
+    """Telemetry must not be able to fail a run that is otherwise fine."""
+    monkeypatch.setenv(progress.VARIABLE, str(tmp_path / "no" / "such" / "dir" / "e"))
+    progress.report(1, 2, "scan")  # a directory that does not exist
+
+    monkeypatch.setenv(progress.VARIABLE, str(tmp_path / "events.jsonl"))
+    progress.emit("not a number", "nor is the fraction checked by the caller")
+
+    assert not (tmp_path / "events.jsonl").exists()
+
+
+def test_a_cohort_loop_reports_one_event_per_scan(scans, tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv(progress.VARIABLE, str(events_file))
+
+    run(scans=scans, output_dir=tmp_path / "out")
+
+    events = _events(events_file)
+    assert [event["message"] for event in events] == ["scan 1 of 2", "scan 2 of 2"]
+    # Rising, and starting at zero: the fraction is the share of the batch
+    # already behind the item, so it never counts one that is still running.
+    fractions = [event["fraction"] for event in events]
+    assert fractions == sorted(fractions) and fractions[0] == 0.0

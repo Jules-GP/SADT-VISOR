@@ -31,6 +31,32 @@ _INSTALL_HINT = (
 )
 
 
+def holds_a_series(root: str) -> bool:
+    """True when anything under `root` is a readable DICOM series.
+
+    Asked rather than declared. DICOM slices routinely carry no extension at
+    all, so a clinician could not tell from a file name either -- which is why
+    the panel used to put the question to them, and why the answer being wrong
+    was a run that failed for a reason nobody could see. ALI's CBCT engine has
+    always detected it this way; this is the same question asked in the same
+    words.
+
+    Stops at the first series found: a cohort of forty patients does not need
+    forty answers to a yes/no question.
+    """
+    # SimpleITK is imported at module level here; GDCM comes with it.
+    reader = sitk.ImageSeriesReader()
+    for directory, _subdirs, _names in os.walk(root):
+        try:
+            if reader.GetGDCMSeriesFileNames(directory):
+                return True
+        except RuntimeError:
+            # GDCM raises on a directory it cannot even scan. That is "no
+            # series here", not a failure of the run.
+            continue
+    return False
+
+
 def convert_tree(input_root: str, output_root: str) -> str:
     """Convert every DICOM series under `input_root` into `output_root`.
 

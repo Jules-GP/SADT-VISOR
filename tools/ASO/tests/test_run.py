@@ -11,6 +11,7 @@ back.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -718,6 +719,7 @@ class FakeSup:
         self.tmp = tmp_path
         self.calls = []
         self.messages = []
+        self.call_index = 0
 
     def run(self, tool, **params):
         # The input is captured HERE, not after the run: it lives in the
@@ -730,14 +732,22 @@ class FakeSup:
             for root, _dirs, files in os.walk(str(params["input"]))
             for name in sorted(files)
         ]
-        output_dir = params["output_dir"]
+        # The SUPERVISOR owns where a callee writes, exactly as the server owns
+        # it for a request: the caller passes no `output_dir` and reads the path
+        # back off the return value. Modelled here because a fake that let the
+        # caller name the directory would pass whatever the caller did.
+        self.call_index += 1
+        output_dir = os.path.join(
+            str(self.tmp), "sup", f"{self.call_index:02d}_{tool}", "output"
+        )
+        os.makedirs(output_dir, exist_ok=True)
         for key, landmarks in self.predictions.items():
             markups.write_landmarks(
-                landmarks, os.path.join(str(output_dir), f"{key}_lm_Pred.mrk.json")
+                landmarks, os.path.join(output_dir, f"{key}_lm_Pred.mrk.json")
             )
         from pathlib import Path
 
-        return Path(str(output_dir))
+        return Path(output_dir)
 
     def progress(self, fraction, message):
         self.messages.append((fraction, message))
@@ -776,17 +786,35 @@ def test_the_missing_supervisor_is_reported_before_the_missing_model(tmp_path):
         )
 
 
-def test_fully_automated_cbct_needs_a_model_bundle(tmp_path):
-    """It used to be optional, because the server picked a bundle matching the
-    input from its own hosted models. A tool no longer resolves paths, so the
-    bundle has to be named -- and saying which argument is the difference
-    between a fixable request and a failure inside another tool."""
-    with pytest.raises(ToolInputError, match="landmark_model"):
+def test_fully_automated_cbct_asks_for_landmarks_not_for_weights(tmp_path):
+    """ASO names no bundle. Which weights place the landmarks is the landmark
+    tool's business, and it finds its own from its own data folder -- this used
+    to compose a path into ALI's storage, which meant ASO holding a name for its
+    neighbour's layout and a copy of its weights beside its own references."""
+    sup = FakeSup({}, tmp_path)
+    with pytest.raises(Exception):
+        # Fails later, on the empty input -- what matters is that it got past
+        # the argument check without a bundle.
+        _run_aso(
+            tmp_path, input=str(tmp_path), reference=str(tmp_path),
+            modality="CBCT", automation="Fully-Automated", sup=sup,
+        )
+    for call in getattr(sup, "calls", []):
+        assert "model" not in call.get("params", {}), call
+
+
+def test_a_named_bundle_is_still_passed_on(tmp_path):
+    """An override, not a requirement: a caller pinning a bundle is recording
+    which weights ran, and is obeyed."""
+    sup = FakeSup({}, tmp_path)
+    with pytest.raises(Exception):
         _run_aso(
             tmp_path, input=str(tmp_path), reference=str(tmp_path),
             modality="CBCT", automation="Fully-Automated",
-            sup=FakeSup({}, tmp_path),
+            landmark_model="MyBundle", sup=sup,
         )
+    passed = [c for c in getattr(sup, "calls", []) if "model" in c.get("params", {})]
+    assert not passed or passed[0]["params"]["model"] == "MyBundle"
 
 
 def test_fully_automated_cbct_runs_through_the_supervisor(tmp_path):
@@ -1502,3 +1530,312 @@ def test_arguments_naming_hosted_weights_end_in_model_or_reference():
         assert is_hosted(name), name
     # And nothing else claims to be hosted by accident.
     assert {name for name in paths if is_hosted(name)} == hosted
+
+
+# ---------------------------------------------------------------------------
+# Progress -- what a client watching a forty-patient run is shown
+# ---------------------------------------------------------------------------
+
+def _events(path) -> list:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+
+
+def test_the_cbct_phases_report_where_they_have_got_to(tmp_path, monkeypatch):
+    """One event per patient per phase, and the fraction only ever rises.
+
+    Three loops share the bar -- recentring, then registration -- and each is
+    given the slice of the run it occupies. Without that the second phase sends
+    the bar back to zero, which reads as a run starting over.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _cbct_case(tmp_path / "input", key="patient1")
+    _cbct_case(tmp_path / "input", key="patient2")
+
+    dispatch.orient(
+        input_path=str(tmp_path / "input"),
+        reference_path=_cbct_reference(tmp_path),
+        modality=catalogs.MODALITY_CBCT,
+        automation=catalogs.AUTOMATION_SEMI,
+        cbct_landmarks=list(_REFERENCE_POINTS),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    events = _events(events_file)
+    assert [event["message"] for event in events] == [
+        "centring scan 1 of 2", "centring scan 2 of 2",
+        "orienting patient 1 of 2", "orienting patient 2 of 2",
+    ]
+    fractions = [event["fraction"] for event in events]
+    assert fractions == sorted(fractions)
+    # No patient's name, no file name: a progress message is stored on the
+    # server and shown, and either one is patient metadata.
+    assert not any("patient1" in event["message"] for event in events)
+
+
+def test_the_ios_batch_reports_one_event_per_patient(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _ios_case(tmp_path / "input", key="patient1")
+
+    dispatch.orient(
+        input_path=str(tmp_path / "input"),
+        reference_path=_ios_reference(tmp_path),
+        modality=catalogs.MODALITY_IOS,
+        automation=catalogs.AUTOMATION_FULLY,
+        output_dir=str(tmp_path / "out"),
+    )
+
+    assert [event["message"] for event in _events(events_file)] == [
+        "orienting patient 1 of 1",
+    ]
+
+
+def test_the_landmark_waypoint_reaches_the_supervisor(tmp_path):
+    """The one thing `FakeSup.messages` exists for, and nothing asserted on it.
+
+    The waypoint is what tells a watcher the run has left ASO and is inside the
+    landmark tool -- the longest single step of a fully-automated run, and the
+    one a bar frozen at 20% would otherwise be unexplained by.
+    """
+    root = tmp_path / "input"
+    _write_scan(root / "patient1_scan.nii.gz")
+    sup = FakeSup({"patient1": _predicted()}, tmp_path)
+
+    _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
+        landmark_model="Bundle", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
+    )
+
+    assert (0.2, f"predicting landmarks with {dispatch.LANDMARK_TOOL}") in sup.messages
+
+
+# ---------------------------------------------------------------------------
+# What reaches the log: a position, never a patient
+# ---------------------------------------------------------------------------
+
+def test_an_unreadable_markups_file_is_logged_without_its_name(tmp_path, caplog):
+    """The rule the progress messages follow, applied to the log.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log, so a name
+    written here outlives the run. The unobvious half is that the exception's
+    MESSAGE cannot travel either: `markups.load_landmarks` quotes the file's
+    own name in it, so passing `exc` through would put the name straight back.
+    """
+    bad = tmp_path / "Smith_John_T1_lm.mrk.json"
+    bad.write_text(json.dumps({"markups": []}))
+
+    with caplog.at_level(logging.INFO, logger="sadt_aso.cbct.pipeline"):
+        assert cbct_pipeline.load_landmarks([str(bad)]) == {}
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == ["Skipping markups file 1 of 1: ValueError"], messages
+
+
+def test_a_landmark_file_the_landmark_tool_wrote_is_skipped_without_its_name(
+    tmp_path, caplog
+):
+    """Same rule on the collection side: these files are named after the
+    caller's scans, so their names are the caller's too."""
+    (tmp_path / "Smith_John_T1_Pred.mrk.json").write_text(json.dumps({"markups": []}))
+
+    with caplog.at_level(logging.INFO, logger="sadt_aso.dispatch"):
+        assert dispatch._collect(str(tmp_path)) == {}
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "Skipping a landmark file the landmark tool wrote: ValueError"
+    ], messages
+
+
+def test_meshes_with_no_jaw_in_the_name_are_counted_not_named(tmp_path, caplog):
+    """How many, and what to do about it -- which is the whole diagnosis, the
+    reason being the same for every one of them. The JawError quotes the file
+    it came from, so the messages themselves are never what is logged."""
+    (tmp_path / "Smith_John.vtk").write_bytes(b"")
+    (tmp_path / "Jones_Mary.vtk").write_bytes(b"")
+
+    with caplog.at_level(logging.INFO, logger="sadt_aso.ios.pipeline"):
+        assert ios_pipeline.discover(str(tmp_path), "Or") == {}
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, messages
+    assert messages[0].startswith("2 file(s) skipped: nothing in the name says")
+    assert not any("Smith_John" in m or "Jones_Mary" in m for m in messages), messages
+
+
+def test_a_dicom_tree_is_recognised_without_being_declared():
+    """The panel used to ask "Input is DICOM". A clinician cannot tell either:
+    DICOM slices routinely carry no extension, so the question was one they had
+    to guess at, and guessing wrong produced a run that failed for a reason
+    nobody could see."""
+    import os
+    from sadt_aso.cbct import dicom
+
+    testfiles = "/home/luciacev/code/VISOR-serve/DATA/ASO/testfiles"
+    if not os.path.isdir(os.path.join(testfiles, "CBCT_FullyAuto_DCM")):
+        import pytest
+        pytest.skip("the ASO test files are not staged on this machine")
+
+    assert dicom.holds_a_series(os.path.join(testfiles, "CBCT_FullyAuto_DCM"))
+    assert dicom.holds_a_series(os.path.join(testfiles, "CBCT_SemiAuto_DCM"))
+    # And the NIfTI forms of the same cohorts are not mistaken for one.
+    assert not dicom.holds_a_series(os.path.join(testfiles, "CBCT_FullyAuto"))
+    assert not dicom.holds_a_series(os.path.join(testfiles, "CBCT_SemiAuto"))
+
+
+def test_an_empty_folder_is_not_a_series():
+    """GDCM raises on a directory it cannot scan, which is "no series here",
+    not a failure of the run."""
+    import tempfile
+    from sadt_aso.cbct import dicom
+
+    assert not dicom.holds_a_series(tempfile.mkdtemp())
+
+
+def test_the_reference_is_chosen_by_what_the_selection_needs():
+    """No choice here for a clinician to make. The two published CBCT bundles
+    carry DISJOINT landmark sets, so the selection already says which target
+    frame applies; asking again could only produce a pairing that fails every
+    patient separately."""
+    import os
+    from sadt_aso import catalogs, dispatch
+
+    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
+    if not os.path.isdir(os.path.join(models, "IOS_Gold_file")):
+        import pytest
+        pytest.skip("the ASO reference bundles are not staged on this machine")
+
+    frankfurt = ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"]
+    occlusal = ["ANS", "IF", "PNS", "UL6O", "UR1O", "UR6O"]
+
+    assert "Frankfurt" in dispatch.choose_reference(models, catalogs.MODALITY_CBCT, frankfurt)
+    assert "Occlusal" in dispatch.choose_reference(models, catalogs.MODALITY_CBCT, occlusal)
+    assert "IOS" in dispatch.choose_reference(models, catalogs.MODALITY_IOS, [])
+
+
+def test_a_selection_no_reference_supports_is_refused_by_name():
+    """Mixing the two frames names what each one offers, rather than orienting
+    onto one of them quietly."""
+    import os
+    from sadt_aso import catalogs, dispatch
+    from sadt_aso.errors import ToolInputError
+    import pytest
+
+    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
+    if not os.path.isdir(os.path.join(models, "IOS_Gold_file")):
+        pytest.skip("the ASO reference bundles are not staged on this machine")
+
+    with pytest.raises(ToolInputError) as caught:
+        dispatch.choose_reference(models, catalogs.MODALITY_CBCT, ["Ba", "ANS"])
+    assert "Frankfurt" in str(caught.value) and "Occlusal" in str(caught.value)
+
+
+def test_the_models_folder_is_not_mistaken_for_a_bundle():
+    """Asked on the TOP LEVEL only: a bundle keeps its markups or its meshes
+    right there, while the models folder keeps only directories. Asked
+    recursively the folder would look like a bundle, because a child is one."""
+    import os
+    from sadt_aso import dispatch
+
+    models = "/home/luciacev/code/VISOR-serve/DATA/ASO/models"
+    if not os.path.isdir(os.path.join(models, "IOS_Gold_file")):
+        import pytest
+        pytest.skip("the ASO reference bundles are not staged on this machine")
+
+    assert not dispatch._is_reference_bundle(models)
+    assert dispatch._is_reference_bundle(os.path.join(models, "IOS_Gold_file"))
+    # ALI's landmark weights live in the same folder and are not a reference.
+    assert not dispatch._is_reference_bundle(os.path.join(models, "CBCT_landmark_models"))
+
+
+
+def test_a_cohort_with_some_landmarks_and_some_without_does_both(tmp_path):
+    """The reason the mode became a derivation. One folder, two kinds of
+    patient: the one carrying landmarks registers on them, the one without is
+    predicted. Declared as a single mode, half the cohort was always wrong."""
+    root = tmp_path / "input"
+    _write_scan(root / "has_lm_scan.nii.gz")
+    _write_markups(str(root / "has_lm_lm.mrk.json"), _REFERENCE_POINTS)
+    _write_scan(root / "no_lm_scan.nii.gz")
+
+    sup = FakeSup({}, tmp_path)
+    try:
+        _run_aso(tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+                 modality="CBCT", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup)
+    except Exception:
+        pass
+    # The landmark tool was asked about the cohort, not about nobody and not
+    # about the patient that already had points.
+    assert getattr(sup, "calls", []), "the scan without landmarks was not predicted"
+
+
+def test_a_patient_with_landmarks_is_never_predicted_for(tmp_path):
+    """Re-predicting over points a clinician placed, or a previous run wrote,
+    is the surprise this removes."""
+    root = tmp_path / "input"
+    _write_scan(root / "p1_scan.nii.gz")
+    _write_markups(str(root / "p1_lm.mrk.json"), _REFERENCE_POINTS)
+
+    sup = FakeSup({}, tmp_path)
+    _run_aso(tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+             modality="CBCT", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup)
+
+    assert not getattr(sup, "calls", []), "landmarks already on disk were predicted again"
+
+
+def test_written_landmarks_are_drawn_when_slicer_opens_them(tmp_path):
+    """The markups DISPLAY node must be on, not just each control point.
+
+    `false` on the display node switches the whole node off: Slicer loads the
+    file, builds the node, lists it in the Markups module -- and draws nothing,
+    with no error to explain it. Both original CLIs wrote `false`, and it went
+    unnoticed inside the old Slicer module because that module loaded the nodes
+    itself and could switch them back on. A returned archive has no such panel:
+    the file is opened as it was written.
+
+    Pinned here because nothing pinned it, which is exactly why it shipped. ALI
+    carries the same rule in its own writer.
+    """
+    path = markups.write_landmarks(
+        {"Ba": (1.0, 2.0, 3.0), "N": (4.0, 5.0, 6.0)},
+        str(tmp_path / "P1_lm_Or.mrk.json"),
+    )
+    node = json.loads(Path(path).read_text())["markups"][0]
+
+    assert node["display"]["visibility"] is True, (
+        "the display node is off, so nothing is drawn however visible the points are"
+    )
+    assert all(point["visibility"] is True for point in node["controlPoints"])
+
+
+def test_landmarks_rewritten_from_a_callers_file_are_drawn_too(tmp_path):
+    """`rewrite_landmarks` keeps the caller's own display settings -- their
+    colours, their glyph sizes -- and that is right for every field but one.
+
+    `visibility` on the display node decides whether anything is drawn at all.
+    Every file this tool wrote before that was fixed carries `false`, so a
+    caller feeding one back in got an invisible result and no way to tell it
+    from a run that placed nothing.
+    """
+    template = tmp_path / "given.mrk.json"
+    template.write_text(json.dumps({
+        "markups": [{
+            "type": "Fiducial",
+            "display": {"visibility": False, "color": [1.0, 0.0, 0.0]},
+            "controlPoints": [
+                {"label": "Ba", "position": [0.0, 0.0, 0.0], "visibility": True},
+            ],
+        }]
+    }))
+
+    path = markups.rewrite_landmarks(
+        {"Ba": (1.0, 2.0, 3.0)}, str(template), str(tmp_path / "out.mrk.json"))
+    node = json.loads(Path(path).read_text())["markups"][0]
+
+    assert node["display"]["visibility"] is True
+    assert node["display"]["color"] == [1.0, 0.0, 0.0], (
+        "the caller's own colour is theirs to keep"
+    )

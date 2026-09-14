@@ -166,15 +166,23 @@ def load_landmarks(paths: list) -> dict:
     """Merge every markups file a patient has into one landmark dict.
 
     Later files win on a repeated label, which only happens when a caller sends
-    overlapping groups. Unreadable files are skipped with a warning naming the
-    file, never the data.
+    overlapping groups. An unreadable file is skipped with a warning giving its
+    position and the failure's type -- never its name, and never the data.
     """
     merged: dict = {}
-    for path in paths:
+    for index, path in enumerate(paths, start=1):
         try:
             merged.update(markups.load_landmarks(path))
         except (ValueError, OSError) as exc:
-            logger.warning("Skipping '%s': %s", os.path.basename(path), exc)
+            # The TYPE and not the message, which is the unobvious half: the
+            # ValueError `markups.load_landmarks` raises quotes the file's own
+            # name, so passing `exc` through would put it back. The type is the
+            # diagnosis anyway -- JSONDecodeError, ValueError and
+            # FileNotFoundError are three different mistakes.
+            logger.warning(
+                "Skipping markups file %d of %d: %s",
+                index, len(paths), type(exc).__name__,
+            )
     return merged
 
 

@@ -29,8 +29,45 @@ def run(
     networks: list[
         Literal["Occlusal", "Cervical", "Mucogingival"]
     ] = ["Occlusal", "Cervical"],
+    # Spelled out because `Literal` takes literals only -- it cannot be built
+    # from catalog.LANDMARKS. That makes this a second declaration of the same
+    # set, which is the thing this contract otherwise avoids, so a test asserts
+    # the two agree.
+    landmarks: list[
+        Literal[
+            # Occlusal Upper
+            "UL7O", "UL7MB", "UL7DB", "UL6O", "UL6MB", "UL6DB", "UL5O", "UL5MB",
+            "UL5DB", "UL4O", "UL4MB", "UL4DB", "UL3O", "UL3MB", "UL3DB", "UL2O",
+            "UL2MB", "UL2DB", "UL1O", "UL1MB", "UL1DB", "UR1O", "UR1MB", "UR1DB",
+            "UR2O", "UR2MB", "UR2DB", "UR3O", "UR3MB", "UR3DB", "UR4O", "UR4MB",
+            "UR4DB", "UR5O", "UR5MB", "UR5DB", "UR6O", "UR6MB", "UR6DB", "UR7O",
+            "UR7MB", "UR7DB",
+            # Occlusal Lower
+            "LL7O", "LL7MB", "LL7DB", "LL6O", "LL6MB", "LL6DB", "LL5O", "LL5MB",
+            "LL5DB", "LL4O", "LL4MB", "LL4DB", "LL3O", "LL3MB", "LL3DB", "LL2O",
+            "LL2MB", "LL2DB", "LL1O", "LL1MB", "LL1DB", "LR1O", "LR1MB", "LR1DB",
+            "LR2O", "LR2MB", "LR2DB", "LR3O", "LR3MB", "LR3DB", "LR4O", "LR4MB",
+            "LR4DB", "LR5O", "LR5MB", "LR5DB", "LR6O", "LR6MB", "LR6DB", "LR7O",
+            "LR7MB", "LR7DB",
+            # Cervical Upper
+            "UL7CL", "UL7CB", "UL6CL", "UL6CB", "UL5CL", "UL5CB", "UL4CL", "UL4CB",
+            "UL3CL", "UL3CB", "UL2CL", "UL2CB", "UL1CL", "UL1CB", "UR1CL", "UR1CB",
+            "UR2CL", "UR2CB", "UR3CL", "UR3CB", "UR4CL", "UR4CB", "UR5CL", "UR5CB",
+            "UR6CL", "UR6CB", "UR7CL", "UR7CB",
+            # Cervical Lower
+            "LL7CL", "LL7CB", "LL6CL", "LL6CB", "LL5CL", "LL5CB", "LL4CL", "LL4CB",
+            "LL3CL", "LL3CB", "LL2CL", "LL2CB", "LL1CL", "LL1CB", "LR1CL", "LR1CB",
+            "LR2CL", "LR2CB", "LR3CL", "LR3CB", "LR4CL", "LR4CB", "LR5CL", "LR5CB",
+            "LR6CL", "LR6CB", "LR7CL", "LR7CB",
+            # Mucogingival Lower
+            "LL6MG", "LL5MG", "LL4MG", "LL3MG", "LL2MG", "LL1MG", "L0MG", "LR1MG",
+            "LR2MG", "LR3MG", "LR4MG", "LR5MG", "LR6MG",
+        ]
+    ] = [],
     prediction_ID: str = "Pred",
     device: Literal["cuda", "cpu"] = "cuda",
+    *,
+    sup=None,
 ) -> Path:
     """Place anatomical landmarks on an intraoral surface scan.
 
@@ -51,6 +88,11 @@ def run(
             mandible only. A point it had to place from a fit of the arch,
             rather than from the render, carries a caveat in its own
             `description` field and in `landmarks_degraded` in the report.
+        landmarks: Predict exactly these landmarks -- naming any of them
+            REPLACES the family selection rather than narrowing it, which is
+            what lets a caller ask for the points it needs instead of taking a
+            whole family to use three of them. Left empty, `networks` decides,
+            which is what a client showing no family control relies on.
         prediction_ID: Suffix used in output names, e.g. `scan_lm_Pred.mrk.json`.
         device: "cuda" or "cpu". CUDA falls back to CPU when no card is
             visible, with a warning.
@@ -58,8 +100,17 @@ def run(
     Returns:
         The output directory, holding the markups files and the run report.
 
-    The meshes must already carry tooth labels: run `Crown_Seg` over them first
-    and pass its output here. This tool does not call another one.
+    The landmark networks are pointed at teeth, so a mesh has to carry a
+    per-point tooth-label array. One that does not is sent to `Crown_Seg`
+    through the supervisor and processed after the meshes that already had
+    theirs -- the ready ones first, so their landmarks are on disk before a
+    second of segmentation is spent, and `segmented_on_the_fly` in the run
+    report says which meshes needed it. A mesh `Crown_Seg` cannot label is
+    reported as that one mesh failing, never as the batch failing.
+
+    With no supervisor -- a direct call, or a server too old to inject one --
+    an unlabelled mesh refuses the batch as it always did, naming `Crown_Seg`:
+    run it over the meshes yourself and pass its output here.
     """
     # torch and pytorch3d are imported inside the engine: CI imports this
     # module on every PR to publish the schema, and that must not cost a CUDA
@@ -70,7 +121,9 @@ def run(
         model_path=str(model),
         output_dir=str(output_dir),
         ios_networks=networks,
+        landmarks=landmarks,
         prediction_ID=prediction_ID,
         device=device,
+        sup=sup,
     )
     return output_dir

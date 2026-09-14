@@ -22,27 +22,57 @@ from . import catalogs
 _INPUTS = "Inputs"
 _CBCT = "Landmark Reference"
 _IOS = "Teeth & Landmarks"
+_ADVANCED = "Advanced"
 _OUTPUTS = "Outputs"
 
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
 _IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
-# The bundle the landmark tool runs with, and it only runs in Fully-Automated:
-# Semi-Automated registers on landmarks the caller already has. Shown in both,
-# it reads as a model the semi-automated run silently ignores.
-_CBCT_PREDICTED = {
-    "modality": catalogs.MODALITY_CBCT,
-    "automation": catalogs.AUTOMATION_FULLY,
-}
-
 LAYOUT = {
+    # Injected by the server for any tool that calls another, so it is not in
+    # run()'s signature -- see describe.INJECTED_ARGUMENTS. Named here because
+    # "intermediate results" says nothing to a clinician: what this chain
+    # produces on the way is ALI's raw prediction, before ASO moves it.
+    # Injected by the server for any tool that calls another, so it is not in
+    # run()'s signature -- see describe.INJECTED_ARGUMENTS. The options are the
+    # steps themselves; only the wording is this tool's to give.
+    "keep_intermediate": {
+        "label": "Steps to keep",
+        "option_help": {
+            "ALI_CBCT": "The landmarks the prediction placed, before this tool "
+                        "oriented them -- what to look at when an orientation "
+                        "comes out wrong.",
+        },
+    },
     "input": {"section": _INPUTS, "label": "Scan / Landmark Folder"},
-    "reference": {"section": _INPUTS, "label": "Reference"},
+    # Chosen by what the selection needs, not by the clinician (see
+    # dispatch.choose_reference). The original extension asked for a FOLDER on
+    # the user's own disk; here the bundles are on the server, and which one
+    # applies is already settled by the landmarks being registered on -- the two
+    # CBCT references carry disjoint sets. Still an argument: naming one is how
+    # a caller uses a reference of their own.
+    "reference": {"section": _INPUTS, "label": "Reference", "hidden": True},
     "modality": {"section": _INPUTS, "label": "Input Type"},
-    "automation": {"section": _INPUTS, "label": "Mode"},
-    # Landmarks a caller supplies rather than has predicted. Useful in both
-    # modalities, so no condition -- it is the escape hatch that makes
-    # fully-automated work with no landmark tool at all.
-    "landmarks": {"section": _INPUTS, "label": "Landmark folder (optional)"},
+    # Derived from the data, per patient and per jaw: landmarks beside a scan
+    # are landmarks to register on, a scan with none is one to predict or to
+    # take centroids from. Asking the clinician to declare it meant the answer
+    # could disagree with the folder -- and when it did, the folder won, in
+    # silence. Still an argument, as the one override it can still express:
+    # "ignore the landmarks that are there and predict anyway".
+    "automation": {"section": _INPUTS, "label": "Mode", "hidden": True},
+    # Landmarks a caller supplies rather than has predicted: what ALI wrote on
+    # an earlier run, or points placed by hand. Useful in both modalities, so no
+    # condition -- it is the escape hatch that makes fully-automated work with
+    # no landmark tool at all.
+    #
+    # NOT labelled "(optional)": the client already says so for any optional
+    # file argument, and saying it here too printed "Landmark folder (optional)
+    # (optional)". A tool names the thing; whether it is required is the
+    # schema's to say, and the panel's to show.
+    #
+    # In Advanced because of who it is FOR. Someone who already has landmarks
+    # goes looking for it; someone who does not should not have to step over it
+    # on the way to Apply.
+    "landmarks": {"section": _ADVANCED, "label": "Landmark folder"},
 
     # -- CBCT ---------------------------------------------------------------
     "cbct_landmarks": {
@@ -55,16 +85,16 @@ LAYOUT = {
         },
         "visible_when": _CBCT_ONLY,
     },
-    "landmark_model": {
-        "section": _CBCT,
-        "label": "Landmark model bundle",
-        "visible_when": _CBCT_PREDICTED,
-    },
-    "dicom_input": {
-        "section": _INPUTS,
-        "label": "Input is DICOM",
-        "visible_when": _CBCT_ONLY,
-    },
+    # Found in the same model folder the server already hands over -- one
+    # directory per landmark, which is the shape ALI_CBCT lays its weights
+    # out in. A clinician choosing a fully-automated run is not choosing
+    # which weights predict; they are asking not to place points by hand.
+    "landmark_model": {"section": _CBCT, "label": "Landmark model bundle",
+                       "hidden": True},
+    # Detected from the data (see dispatch._run_cbct), so the panel does not
+    # put the question to a clinician who cannot see the answer either.
+    # Still an argument: a caller who knows better can force it.
+    "dicom_input": {"section": _INPUTS, "label": "Input is DICOM", "hidden": True},
 
     # -- IOS ----------------------------------------------------------------
     "ios_teeth": {

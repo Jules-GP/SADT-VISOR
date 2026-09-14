@@ -80,7 +80,16 @@ def discover(ios_dir: str, cbct_dir: str) -> dict:
             f"{len(ios)} intraoral key(s) and {len(cbct)} CBCT key(s): {unpaired}."
         )
     if unpaired:
-        logger.warning("Not registered, only one modality present: %s", unpaired)
+        # The counts, never the keys: a key is the caller's own file name, and
+        # this line reaches the server's log. `unpaired` is returned as it is,
+        # and the run report names every one of them -- that goes back to
+        # whoever sent the data.
+        without_cbct = sum(1 for reason in unpaired.values() if reason == "no CBCT")
+        logger.warning(
+            "Not registered, only one modality present: %d patient(s) with no "
+            "CBCT, %d with no intraoral scan",
+            without_cbct, len(unpaired) - without_cbct,
+        )
     return paired, unpaired
 
 

@@ -21,6 +21,12 @@ Two layers, one file:
 1. any interpreter -- resolve `tools/<name>/.venv/bin/python` and re-exec;
 2. the tool's own venv -- import the package, build the parser, call `run()`.
 
+It also sets `SADT_PROGRESS_FILE`, which is how the SERVER asks a tool for
+progress, and echoes every line a tool appends to it. A tool's progress
+reporting is therefore exercised from a checkout, on the same channel it will
+use in production, rather than only being discovered to be silent once it is
+deployed.
+
 Stdlib only and Python 3.9 compatible, for the same reason `describe.py` is: it
 has to run inside whichever interpreter a tool pinned. The annotation vocabulary
 is imported FROM describe.py rather than restated, so the CLI can never offer an
@@ -29,10 +35,13 @@ option the schema does not, or refuse one it does.
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import typing
 from pathlib import Path
 
@@ -179,6 +188,112 @@ def coerce(value, annotation):
 
 
 # ---------------------------------------------------------------------------
+# Progress: the same channel the server uses
+# ---------------------------------------------------------------------------
+
+PROGRESS_VARIABLE = "SADT_PROGRESS_FILE"
+
+# How often the echo below looks for new lines. The server has its own knob for
+# the same thing (`RUN_EVENT_POLL_SECONDS`); this one only has to be fast
+# enough that a developer reads it as live.
+PROGRESS_POLL_SECONDS = 0.25
+
+
+def append_progress(fraction, message):
+    """One event, appended to the file named in the environment. Never raises.
+
+    The same few lines every tool carries in its own `progress.py`, restated
+    here rather than imported: this script runs in the TOOL's venv, and
+    importing the tool's copy would mean reaching into a package before the
+    tool has been resolved. It is short enough that the duplication costs less
+    than the coupling.
+    """
+    path = os.environ.get(PROGRESS_VARIABLE)
+    if not path:
+        return False
+    try:
+        if fraction is not None:
+            fraction = round(min(1.0, max(0.0, float(fraction))), 4)
+        line = json.dumps(
+            {"fraction": fraction, "message": str(message)[:200]}
+        ).encode("utf-8") + b"\n"
+        handle = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(handle, line)
+        finally:
+            os.close(handle)
+        return True
+    except Exception:  # noqa: BLE001 -- telemetry must never fail a run
+        return False
+
+
+def format_progress(event):
+    """One event as one stderr line, in the shape `LocalSupervisor.log` uses."""
+    fraction = event.get("fraction")
+    share = " --%" if fraction is None else "{:>4.0%}".format(fraction)
+    return "[progress]{} {}".format(share, event.get("message", ""))
+
+
+def watch_progress():
+    """Set `SADT_PROGRESS_FILE` and echo what a tool appends to it.
+
+    Returns a callable that drains and stops. It is a no-op when the variable
+    is ALREADY set -- a nested `sup.run()` re-enters this script with the
+    parent's file in its environment, which is exactly the inheritance the
+    server relies on for chain progress, and a second echo would print every
+    event once per level of the chain.
+    """
+    if os.environ.get(PROGRESS_VARIABLE):
+        return lambda: None
+
+    directory = tempfile.mkdtemp(prefix="sadt_progress_")
+    path = os.path.join(directory, "events.jsonl")
+    open(path, "a", encoding="utf-8").close()
+    os.environ[PROGRESS_VARIABLE] = path
+
+    stopping = threading.Event()
+
+    def echo():
+        seen = 0
+        while True:
+            done = stopping.is_set()
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    text = handle.read()
+            except OSError:
+                text = ""
+            # COMPLETE lines only: whatever follows the last newline is a write
+            # still in flight, and consuming it would lose the event rather
+            # than print it late. Each event is one write, so this is at most
+            # one poll behind.
+            lines = text.split("\n")[:-1]
+            for line in lines[seen:]:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue  # not ours, and not worth failing a run over
+                sys.stderr.write(format_progress(event) + "\n")
+                sys.stderr.flush()
+            seen = len(lines)
+            if done:
+                return
+            time.sleep(PROGRESS_POLL_SECONDS)
+
+    # A daemon: an echo of telemetry must never be the reason the process
+    # refuses to exit after the tool has returned.
+    thread = threading.Thread(target=echo, daemon=True)
+    thread.start()
+
+    def stop():
+        stopping.set()
+        thread.join(timeout=5)
+        os.environ.pop(PROGRESS_VARIABLE, None)
+        shutil.rmtree(directory, ignore_errors=True)
+
+    return stop
+
+
+# ---------------------------------------------------------------------------
 # The supervisor
 # ---------------------------------------------------------------------------
 
@@ -232,7 +347,14 @@ class LocalSupervisor:
         return {key: Path(value) for key, value in result["value"].items()}
 
     def progress(self, fraction, message):
-        self.log("{:.0%} {}".format(fraction, message))
+        # To the file first, because that is where the SERVER's supervisor
+        # puts it: the waypoints tools already call this with have to land in
+        # the same place as their own `progress.py` events, or a chain would
+        # report half of itself on one channel and half on the other. The echo
+        # thread prints it, so writing to stderr here as well would double
+        # every line.
+        if not append_progress(fraction, message):
+            self.log("{:.0%} {}".format(fraction, message))
 
     def log(self, message):
         # stderr, never stdout: stdout carries a result when this script is
@@ -339,7 +461,11 @@ def main(argv=None):
             sys.stderr.write("{}: {}\n".format(name, error))
             return 2
 
-    result = call(name, params, known.depth)
+    stop_watching = watch_progress()
+    try:
+        result = call(name, params, known.depth)
+    finally:
+        stop_watching()
 
     if known.result_file:
         Path(known.result_file).write_text(

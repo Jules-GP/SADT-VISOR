@@ -123,7 +123,7 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
     A previous run's outputs are used only when a patient has nothing else.
     """
     patients: dict = {}
-    unnamed: list = []
+    unnamed = 0
 
     for directory, _, file_names in os.walk(input_root):
         relative = os.path.relpath(directory, input_root)
@@ -137,8 +137,11 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
                 continue
             try:
                 stem, jaw = patient_and_jaw(file_name, output_suffix)
-            except JawError as exc:
-                unnamed.append(str(exc))
+            except JawError:
+                # Counted, not collected: every JawError quotes the file it
+                # came from, and that name is patient metadata the moment it
+                # reaches a log.
+                unnamed += 1
                 continue
             entry = patients.setdefault(os.path.join(prefix, stem), {})
             jaw_entry = entry.setdefault(
@@ -149,8 +152,14 @@ def discover(input_root: str, output_suffix: str = "Or") -> dict:
                 kind = f"old_{kind}"
             jaw_entry[kind].append(os.path.join(directory, file_name))
 
-    for message in unnamed:
-        logger.warning("%s", message)
+    if unnamed:
+        # How many were skipped and what to do about it, which is the whole of
+        # the diagnosis here: the reason is the same for every one of them.
+        logger.warning(
+            "%d file(s) skipped: nothing in the name says which jaw it is. Name "
+            "them so a token does, e.g. 'P1_U_Seg.vtk' / 'P1_Lower.vtk'.",
+            unnamed,
+        )
 
     return {
         key: {
@@ -169,12 +178,19 @@ def _first(preferred: list, fallback: list):
     return candidates[0] if candidates else None
 
 
-def load_reference(reference_dir: str, need_surfaces: bool) -> dict:
+def load_reference(reference_dir: str, need_surfaces=None) -> dict:
     """{jaw: {"surface": path, "markups": path}} for the reference bundle.
 
-    Fully-automated registers meshes against the reference's meshes, so it needs
-    the surfaces; semi-automated registers landmarks against landmarks and needs
-    only the markups.
+    Registering tooth centroids needs the reference's MESHES; registering
+    landmarks needs its MARKUPS. Which of the two a run uses is now decided per
+    jaw, from what each patient came with, so a cohort can legitimately need
+    both -- and this cannot know in advance which.
+
+    So it asks only that the bundle hold SOMETHING for some jaw, and leaves
+    "which form is missing" to the point where it is actually wanted: both
+    `_fully_automated_matrix` and `_semi_automated_matrix` already say it
+    precisely, for that jaw. `need_surfaces` is kept for a caller that does know
+    (True or False), and None -- the normal case now -- means either will do.
     """
     reference = discover(reference_dir)
     merged: dict = {}
@@ -184,11 +200,16 @@ def load_reference(reference_dir: str, need_surfaces: bool) -> dict:
             target["surface"] = target["surface"] or entry["surface"]
             target["markups"] = target["markups"] or entry["markups"]
 
-    wanted = "surface" if need_surfaces else "markups"
-    if not any(entry[wanted] for entry in merged.values()):
+    if need_surfaces is None:
+        wanted, what = ("surface", "markups"), "mesh or landmark file"
+    elif need_surfaces:
+        wanted, what = ("surface",), "mesh"
+    else:
+        wanted, what = ("markups",), "landmark file"
+    if not any(entry[key] for entry in merged.values() for key in wanted):
         raise ValueError(
-            f"The reference bundle holds no {'mesh' if need_surfaces else 'landmark file'} "
-            f"whose name says which jaw it is (e.g. 'Gold_Upper.vtk')."
+            f"The reference bundle holds no {what} whose name says which jaw it "
+            f"is (e.g. 'Gold_Upper.vtk')."
         )
     return merged
 
@@ -316,7 +337,19 @@ def _matrix_for(
     if not reference_entry:
         raise ios_icp.RegistrationError(f"the reference has no {jaw} jaw")
 
-    if automation == catalogs.AUTOMATION_FULLY:
+    # Decided by what this JAW came with, not by a mode the caller declared.
+    # Landmarks beside the mesh are landmarks to register on; a mesh with none
+    # is one to register by its tooth centroids -- and `_fully_automated_matrix`
+    # segments it first if it carries no tooth labels either. The caller used to
+    # say which, and saying it wrong was silent: a fully-automated run ignored
+    # landmarks already on disk, and a semi-automated one failed jaw by jaw with
+    # "no landmark file".
+    #
+    # `automation` survives as an OVERRIDE, and only in the direction that adds
+    # nothing back: asking for Fully-Automated over a jaw that HAS landmarks is
+    # asking for them to be ignored, which is a legitimate thing to want.
+    forced = automation == catalogs.AUTOMATION_FULLY
+    if forced or not available["markups"]:
         return _fully_automated_matrix(
             available, reference_entry, selected_teeth[jaw], max_triplets, seed
         )

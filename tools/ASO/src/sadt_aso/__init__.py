@@ -96,18 +96,18 @@ def run(
             anything else as a file a clinician may upload. `landmark_models`
             missed that rule by one letter and would have asked for a 4.7 GB
             bundle from a laptop.
-        cbct_landmarks: CBCT only. Which landmarks to register on; at least 3,
-            and they must exist in the reference. The default seven are the
-            points both published reference bundles are built on.
-        ios_teeth: IOS only. Which teeth to register on. Fully-Automated aligns
-            each jaw from 3 or 4 spread across the arch.
-        ios_landmark_types: IOS Semi-Automated only. Combined with `ios_teeth`
-            into `<tooth><type>` keys, e.g. UR6 x O -> UR6O.
-        ios_jaws: IOS only. Which jaws to orient.
-        ios_occlusion: IOS only. Whether each jaw is oriented on its own, or one
-            jaw's transform is applied to the other so the occlusion is kept.
-        dicom_input: CBCT only. Convert DICOM series found in the input to NIfTI
-            before orienting.
+        cbct_landmarks: Which landmarks to register on; at least 3, and they
+            must exist in the reference. The default seven are the points both
+            published reference bundles are built on.
+        ios_teeth: Which teeth to register on, 3 or 4 spread across each arch.
+        ios_landmark_types: Which point on each tooth, combined with the teeth
+            above into `<tooth><type>` keys, e.g. UR6 x O -> UR6O. Used for the
+            arches that came with landmarks beside the mesh.
+        ios_jaws: Which jaws to orient.
+        ios_occlusion: Whether each jaw is oriented on its own, or one jaw's
+            transform is applied to the other so the occlusion is kept.
+        dicom_input: Force DICOM conversion. Detected from the input on its own,
+            so this is only for a caller who knows better than the detector.
         output_suffix: Added to each output name, e.g. `patient1_Or.nii.gz`.
         max_triplets: Landmark triplets the coarse alignment searches before
             running ICP. Lower is faster and less thorough; it changes the

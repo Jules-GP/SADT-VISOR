@@ -8,6 +8,7 @@ tool can see of them: five members, duck-typed, nothing imported across venvs.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from sadt_areg_ioscbct import dispatch, run, tools
+from sadt_areg_ioscbct import dispatch, pipeline, run, tools
 from sadt_areg_common import catalogs, pairing
 from sadt_areg_common.errors import SupervisorRequired, ToolInputError
 
@@ -136,3 +137,112 @@ def test_every_tool_is_named_by_string():
     assert 'sup.run("' in source
     for tool in ("Crown_Seg", "ALI_CBCT", "ALI_IOS", "ASO"):
         assert f'"{tool}"' in source, tool
+
+
+# ---------------------------------------------------------------------------
+# Progress -- the waypoints, and the loop after them
+# ---------------------------------------------------------------------------
+
+def _events(path) -> list:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+
+
+def test_each_step_says_which_tool_the_run_is_inside(tmp_path):
+    """The three waypoints, which `FakeSup.messages` has recorded and nothing
+    read until now.
+
+    They are what a watcher has instead of a frozen bar: a fully-automated run
+    spends most of its time inside ALI and ASO, and without them the panel
+    cannot say which. They rise, and none of them names a file.
+    """
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    sup = FakeSup(tmp_path, {name: (lambda params: planted) for name in
+                             ("ALI_CBCT", "ALI_IOS", "ASO")})
+
+    tools.predict_cbct_landmarks(sup, str(tmp_path), "")
+    tools.predict_ios_landmarks(sup, str(tmp_path), "")
+    tools.orient_cbct(sup, str(tmp_path), str(tmp_path), "")
+
+    fractions = [fraction for fraction, _message in sup.messages]
+    assert fractions == [0.1, 0.3, 0.5]
+    assert [message for _fraction, message in sup.messages] == [
+        "predicting CBCT landmarks with ALI_CBCT",
+        "predicting intraoral landmarks with ALI_IOS",
+        "orienting the CBCT with ASO",
+    ]
+
+
+def test_the_registration_loop_starts_where_the_waypoints_stopped(tmp_path, monkeypatch):
+    """A mode that predicted nothing must not report itself as 60% done.
+
+    The waypoints above only fire in the two modes that call other tools; the
+    Registration mode calls none, so its loop owns the whole bar. Getting this
+    wrong is invisible in a result and obvious to whoever is watching.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    for patient in ("P1", "P2"):
+        _write(_phantom(size=8), str(tmp_path / "cbct" / f"{patient}_scan.nii.gz"))
+        (tmp_path / "ios").mkdir(exist_ok=True)
+        (tmp_path / "ios" / f"{patient}_Upper.vtk").write_text("")
+
+    # Everything inside the loop is stood in for; the loop itself, which is
+    # what reports, runs for real.
+    monkeypatch.setattr(dispatch, "_landmarks_by_jaw", lambda root: {"any": {"A": [0.0, 0.0, 0.0]}})
+    monkeypatch.setattr(dispatch, "_surface_points", lambda path: (None, np.zeros((3, 3))))
+    monkeypatch.setattr(
+        dispatch.pipeline, "register_one",
+        lambda points, moving, fixed, max_dist: (np.eye(4), {"rms": 0.0}),
+    )
+    monkeypatch.setattr(
+        dispatch, "_write_surface",
+        lambda surface, points, path: (
+            os.makedirs(os.path.dirname(path), exist_ok=True), open(path, "w").close()
+        ),
+    )
+
+    for start, expected in ((0.0, [0.0, 0.5]), (0.6, [0.6, 0.8])):
+        events_file.write_text("")
+        report = {"patients": {}}
+        dispatch.register(
+            ios_dir=str(tmp_path / "ios"), cbct_dir=str(tmp_path / "cbct"),
+            ios_landmark_dir=str(tmp_path), cbct_landmark_dir=str(tmp_path),
+            output_dir=str(tmp_path / "out"), suffix="Reg", report=report,
+            max_dist=1.0, progress_start=start,
+        )
+        events = _events(events_file)
+        assert [event["message"] for event in events] == ["patient 1 of 2", "patient 2 of 2"]
+        assert [event["fraction"] for event in events] == expected
+
+
+# ---------------------------------------------------------------------------
+# What reaches the log: how many, never which
+# ---------------------------------------------------------------------------
+
+def test_the_unpaired_patients_are_counted_in_the_log_not_named(tmp_path, caplog):
+    """A patient key is the caller's own file name -- and here it can BE the
+    file's stem: `_patient_key` falls back to it when a name holds no digit.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log, so a key
+    written here outlives the run. The returned mapping still names every one
+    of them, and the run report carries it back to whoever sent the data.
+    """
+    (tmp_path / "ios").mkdir()
+    (tmp_path / "cbct").mkdir()
+    (tmp_path / "ios" / "P001_Upper.vtk").write_text("")
+    (tmp_path / "cbct" / "P001_scan.nii.gz").write_text("")
+    (tmp_path / "ios" / "Smith_John_Upper.vtk").write_text("")
+
+    with caplog.at_level(logging.INFO, logger="sadt_areg_ioscbct.pipeline"):
+        paired, unpaired = pipeline.discover(str(tmp_path / "ios"), str(tmp_path / "cbct"))
+
+    assert list(paired) == ["1"]
+    assert "Smith_John_Upper" in unpaired, "the caller is still told which"
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "Not registered, only one modality present: 1 patient(s) with no CBCT, "
+        "0 with no intraoral scan"
+    ], messages

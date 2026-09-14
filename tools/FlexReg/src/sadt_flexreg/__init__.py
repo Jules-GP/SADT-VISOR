@@ -31,6 +31,7 @@ from typing import Literal
 
 import json
 
+from . import progress
 from .pipeline import (
     BUTTERFLY_ARRAY,
     MUCOGINGIVAL_ARRAY,
@@ -138,7 +139,11 @@ def run(
     report = {"mode": mode, "patch": patch, "surfaces": {}}
     produced = []
 
-    for path in surfaces_in(str(root)):
+    found = surfaces_in(str(root))
+    for index, path in enumerate(found, start=1):
+        # The counter, never the surface's name: a file name is patient
+        # metadata and a progress message is stored and shown.
+        progress.report(index, len(found), "surface")
         # Relative to the input root, so two patients named the same in
         # different folders do not overwrite each other and the output mirrors
         # the tree it came from.

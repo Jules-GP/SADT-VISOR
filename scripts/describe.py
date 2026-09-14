@@ -70,6 +70,26 @@ LITERAL_TYPES = (str, int)
 # which is the coupling this repository exists to remove.
 SUPERVISOR = "sup"
 
+# The read-only DATA root, declared and excluded exactly as the supervisor is,
+# and for the same reason: it is not data a client sends. A tool takes it to
+# find ITS OWN model bundle -- `data_root / "ALI" / "models"` -- which is what
+# keeps a caller from having to name its neighbour's weights. The server
+# resolves a hosted-model argument on the way in, but a supervised call never
+# passes that way, so without this the CALLER was composing the path.
+DATA_ROOT = "data_root"
+
+INJECTED = (SUPERVISOR, DATA_ROOT)
+
+# Arguments a tool never declares and the SERVER adds for it. `keep_intermediate`
+# appears on any tool that calls another (see `supervised_calls`): collecting what
+# a chain produced is the same operation every time, so it is done once in the
+# runner rather than written into each orchestrating tool.
+#
+# A layout may still name one. That is the whole point of publishing it here: the
+# argument is generic, but "Keep the predicted landmarks" and "Keep the labelled
+# meshes" are not, and only the tool knows which it produces.
+INJECTED_ARGUMENTS = ("keep_intermediate",)
+
 # The docstring section that explains the arguments, in the Google style the
 # whole repository already writes. It is the ONLY place that text lives: the
 # client shows it under the field, and a panel without it is a column of
@@ -103,6 +123,11 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # ranges: "0.8" says nothing about where that is in a mouth, and
                # "mid"/"out" does.
                "x_labels", "y_labels",
+               # MULTICHOICE only: a "select all" / "select none" pair above
+               # the options, for a catalogue nobody would tick one box at a
+               # time. The client hides the pair when there is only one option,
+               # where it would be two buttons for one check box.
+               "select_all",
                # How many columns this argument's SECTION is laid out in.
                # Declared per argument because that is where a layout hangs its
                # hints; the client reads it back per section.
@@ -110,7 +135,15 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # Arguments naming one cell are drawn together in it.
                "cell",
                # What each of a vec2's two numbers is, written beside its box.
-               "x_label", "y_label")
+               "x_label", "y_label",
+               # {option: one line saying what that option is}. For a catalogue
+               # whose options are CODES -- ALI publishes `UR1MB` and `Ba` -- the
+               # label alone tells a clinician nothing, and the argument's own
+               # description covers all of them at once.
+               "option_help",
+               # How few options a multichoice may be left with; absent means
+               # none is a meaningful answer.
+               "min_selected")
 
 LAYOUT_MODULE = "layout"
 
@@ -428,18 +461,18 @@ def is_supervisor(name, parameter, hints):
     a positional `sup` would be filled by the first argument the runner passes.
     Both fail far from here.
     """
-    if name != SUPERVISOR:
+    if name not in INJECTED:
         return False
     if parameter.kind is not parameter.KEYWORD_ONLY:
         raise SchemaError(
             "'{0}' must be keyword-only: write `*, {0}=None`. Anything else can be "
-            "filled positionally by a caller that meant it as data.".format(SUPERVISOR)
+            "filled positionally by a caller that meant it as data.".format(name)
         )
     if name in hints:
         raise SchemaError(
-            "'{0}' must not be annotated. Being unannotated is what marks it as the "
-            "supervisor rather than an argument, and it is duck-typed so a tool never "
-            "imports the server's type.".format(SUPERVISOR)
+            "'{0}' must not be annotated. Being unannotated is what marks it as "
+            "injected by the runner rather than an argument, and it is duck-typed "
+            "so a tool never imports the server's type.".format(name)
         )
     return True
 
@@ -555,10 +588,12 @@ def layout_for(package, arguments):
 
     for name, hints in declared.items():
         where = "layout for '{}'".format(name)
-        if name not in arguments:
+        if name not in arguments and name not in INJECTED_ARGUMENTS:
             raise SchemaError(
                 "{}: run() has no argument '{}'. A layout may only describe "
-                "arguments that exist.".format(where, name)
+                "arguments that exist, or one of the injected {}.".format(
+                    where, name, ", ".join(INJECTED_ARGUMENTS)
+                )
             )
         if not isinstance(hints, dict):
             raise SchemaError("{}: must be a dict of hints.".format(where))
@@ -569,7 +604,8 @@ def layout_for(package, arguments):
                     where, ", ".join(unknown), ", ".join(LAYOUT_KEYS)
                 )
             )
-        _check_groups(where, hints, arguments[name])
+        if name in arguments:
+            _check_groups(where, hints, arguments[name])
         _check_visible_when(where, hints, arguments)
     return declared
 
@@ -686,8 +722,16 @@ def describe_run(run, package=None):
     # second place to look is a second place to forget.
     for name, text in argument_docs(doc, arguments).items():
         arguments[name]["description"] = text
-    for name, hints in layout_for(package, arguments).items() if package else []:
-        arguments[name].update(hints)
+    injected_layout = {}
+    for name, hints in (layout_for(package, arguments).items() if package else []):
+        if name in arguments:
+            arguments[name].update(hints)
+        else:
+            # An argument this tool does not declare: the server adds it, so its
+            # presentation travels beside the arguments rather than inside them.
+            injected_layout[name] = hints
+    if injected_layout:
+        described["injected_layout"] = injected_layout
 
     if supervisor:
         # Published so the server can tell, before accepting a job, that this

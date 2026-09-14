@@ -12,6 +12,7 @@ is skipped otherwise. CI skips it; run it by hand before opening a PR.
 """
 
 import json
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -762,3 +763,123 @@ def test_every_published_structure_option_is_accepted_by_the_tool():
     """Published, not enforced: the runner calls run(**params) from JSON."""
     for code in _choices("structures"):
         assert catalog.structure_codes([code]) == (code,)
+
+
+# ---------------------------------------------------------------------------
+# Progress -- three phases, and only the middle one is long
+# ---------------------------------------------------------------------------
+
+def test_progress_counts_structures_because_that_is_what_the_run_loops_over(
+    tmp_path, stub_predictor, monkeypatch
+):
+    """Per STRUCTURE, not per scan, and that is the honest unit.
+
+    One nnUNet call covers the whole cohort per structure, so there is no
+    per-scan position to report inside it. Interpolating one would put a number
+    on the bar that nothing in the run measured. What the two ends of the run
+    can count -- reading each scan, writing each scan's outputs -- is counted.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    _write_scan(tmp_path / "input" / "patient02.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "MAX"])
+
+    pipeline.segment(
+        input_path=str(tmp_path / "input"),
+        model_path=bundle,
+        output_dir=str(tmp_path / "out"),
+        structures=("MAND", "MAX"),
+        merge=("SEPARATE",),
+        prediction_ID="Pred",
+    )
+
+    events = [json.loads(line) for line in
+              Path(events_file).read_text().splitlines() if line]
+    assert [event["message"] for event in events] == [
+        "reading scan 1 of 2", "reading scan 2 of 2",
+        "structure 1 of 2", "structure 2 of 2",
+        "writing scan 1 of 2", "writing scan 2 of 2",
+    ]
+    fractions = [event["fraction"] for event in events]
+    assert fractions == sorted(fractions), "the bar must not restart per phase"
+    assert max(fractions) < 1.0, "the run is not finished until the server says so"
+    assert not any("patient" in event["message"] for event in events)
+
+
+# ---------------------------------------------------------------------------
+# What reaches the log: a position, never a patient
+# ---------------------------------------------------------------------------
+
+def test_a_scan_that_cannot_be_read_is_logged_by_position(
+    tmp_path, stub_predictor, caplog
+):
+    """The rule the progress messages follow, applied to the log.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log -- so a scan
+    name written on this path outlives the run and its job directory. The
+    per-scan report still names the input; that goes back to whoever sent it.
+
+    Asserted on the composed message: SimpleITK's own exception can still name
+    the file it could not open, and that is a separate exposure.
+    """
+    _write_scan(tmp_path / "input" / "Smith_John_T1.nii.gz")
+    (tmp_path / "input" / "Jones_Mary_T2.nii.gz").write_bytes(b"not a volume")
+    # A previous run's output, in the folder the caller sent back unchanged.
+    (tmp_path / "input" / "Smith_John_T1_Pred_MAND.nii.gz").write_bytes(b"")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
+
+    with caplog.at_level(logging.INFO, logger="sadt_amasss.pipeline"):
+        report = pipeline.segment(
+            input_path=str(tmp_path / "input"),
+            model_path=bundle,
+            output_dir=str(tmp_path / "out"),
+            structures=("MAND",),
+            merge=("SEPARATE",),
+            prediction_ID="Pred",
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Skipping 1 file(s) that look like a previous AMASSS output" in messages
+    assert any(m.startswith("Could not read scan ") and m.endswith(" of 2")
+               for m in messages), messages
+    assert not any("Smith_John" in m or "Jones_Mary" in m for m in messages), messages
+    assert [scan["input"] for scan in report["scans"] if scan["status"] == "failed"] \
+        == ["Jones_Mary_T2.nii.gz"], "the report still names it"
+
+
+def test_a_missing_prediction_is_logged_by_case_id(tmp_path, monkeypatch, caplog):
+    """`p_001` is the scan's position in the batch AND what nnUNet read and
+    wrote, so it is both the safe half of the old line and the useful one."""
+
+    def predict_only_the_first_case(model_folder, input_dir, output_dir, device, **kwargs):
+        os.makedirs(output_dir, exist_ok=True)
+        name = sorted(n for n in os.listdir(input_dir) if n.endswith("_0000.nii.gz"))[0]
+        reference = sitk.ReadImage(os.path.join(input_dir, name))
+        array = np.zeros(sitk.GetArrayFromImage(reference).shape, dtype=np.uint8)
+        array[2:5, 2:5, 2:5] = 1
+        mask = sitk.GetImageFromArray(array)
+        mask.CopyInformation(reference)
+        sitk.WriteImage(mask, os.path.join(output_dir, name[: -len("_0000.nii.gz")] + ".nii.gz"))
+
+    monkeypatch.setattr(nnunet_runner, "predict_folder", predict_only_the_first_case)
+    monkeypatch.setattr(nnunet_runner, "resolve_device", lambda requested: "cpu")
+    _write_scan(tmp_path / "input" / "Adams_Ann_T1.nii.gz")
+    _write_scan(tmp_path / "input" / "Zulu_Zoe_T2.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
+
+    with caplog.at_level(logging.INFO, logger="sadt_amasss.pipeline"):
+        pipeline.segment(
+            input_path=str(tmp_path / "input"),
+            model_path=bundle,
+            output_dir=str(tmp_path / "out"),
+            structures=("MAND",),
+            merge=("SEPARATE",),
+            prediction_ID="Pred",
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "No MAND prediction for p_001" in messages, messages
+    assert "Failed to assemble outputs for scan 2 of 2" in messages, messages
+    assert not any("Zulu_Zoe" in m or "Adams_Ann" in m for m in messages), messages

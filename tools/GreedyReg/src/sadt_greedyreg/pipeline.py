@@ -15,9 +15,6 @@ import logging
 
 logger = logging.getLogger("GreedyReg")
 
-METRICS = ("NCC", "NMI", "SSD")
-TRANSFORMS = ("Rigid", "Affine")
-
 # Degrees of freedom per transform type, as upstream chose them.
 DEGREES_OF_FREEDOM = {"Rigid": "6", "Affine": "12"}
 

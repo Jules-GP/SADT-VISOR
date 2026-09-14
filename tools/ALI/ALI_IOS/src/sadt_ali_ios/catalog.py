@@ -29,9 +29,6 @@ UNIVERSAL_NUMBERS = {
     "Lower": {name: 18 + index for index, name in enumerate(LOWER_TEETH)},
 }
 
-# Landmark types, in the order the label tables below index them.
-TYPE_LM = ["O", "MB", "DB", "CL", "CB", "MG"]
-
 # Network -> the landmark types it predicts, mapped to the channel of its
 # output the type comes out on.
 NETWORKS = {
@@ -117,12 +114,131 @@ LABELS["MG"] = {
     str(number): [MG_OUTPUT_NAME[index]] for index, number in enumerate(MG_TEETH)
 }
 
+
+# ---------------------------------------------------------------------------
+# What each landmark IS, in words
+# ---------------------------------------------------------------------------
+
+# A landmark is a CODE. `UR1MB` names no anatomy a clinician can read off it,
+# and the argument's own description covers all 153 at once -- so the schema
+# publishes one line per option and the panel shows it on the option itself.
+
+# Position in its quadrant, counted from the midline outward. The universal
+# numbers above are the authority; this is the same arch read as words.
+_TEETH_FROM_MIDLINE = (
+    "central incisor", "lateral incisor", "canine", "first premolar",
+    "second premolar", "first molar", "second molar", "third molar",
+)
+
+
+def _tooth_name(number: int) -> str:
+    """Universal number -> the tooth it names.
+
+    Universal numbering runs 1-16 across the upper arch from the patient's
+    RIGHT, then 17-32 across the lower arch from the patient's LEFT, so each
+    quadrant counts toward the midline or away from it depending which one it
+    is. Derived rather than tabulated, so it cannot drift from the numbers.
+    """
+    if 1 <= number <= 8:
+        return "upper right " + _TEETH_FROM_MIDLINE[8 - number]
+    if 9 <= number <= 16:
+        return "upper left " + _TEETH_FROM_MIDLINE[number - 9]
+    if 17 <= number <= 24:
+        return "lower left " + _TEETH_FROM_MIDLINE[24 - number]
+    if 25 <= number <= 32:
+        return "lower right " + _TEETH_FROM_MIDLINE[number - 25]
+    return "tooth {}".format(number)
+
+
+# Where on the tooth the point sits. The words are this module's own header:
+# Occlusal is the occlusal point plus the mesio- and disto-buccal ones,
+# Cervical the cervical lingual and buccal, Mucogingival the gingival margin.
+_POINT_NAMES = {
+    "O": "occlusal point",
+    "MB": "mesio-buccal point",
+    "DB": "disto-buccal point",
+    "CL": "cervical lingual point",
+    "CB": "cervical buccal point",
+    "MG": "gingival margin point",
+}
+
+
+def _describe_landmarks() -> dict:
+    """{landmark: "<tooth> -- <point> (universal <n>)"}, from LABELS.
+
+    Read out of `LABELS` and never off the label's own spelling. That is not
+    fussiness: the mucogingival names are assigned POSITIONALLY and the midline
+    name shifts the right side by one, so `LR1MG` sits on tooth 26 and parsing
+    it as "LR1" would put it on 25 -- naming the wrong tooth in a tooltip a
+    clinician is about to trust. `LABELS` is where the truth already is.
+    """
+    described = {}
+    for network, table in LABELS.items():
+        for number, labels in table.items():
+            tooth = _tooth_name(int(number))
+            for label in labels:
+                # Longest first: "MB" and "B" would both match a name ending in
+                # "MB", and the longer one is the one that means something.
+                suffix = next((code for code in sorted(_POINT_NAMES, key=len, reverse=True)
+                               if label.endswith(code)), "")
+                point = _POINT_NAMES.get(suffix, "landmark")
+                described[label] = "{} -- {} (universal {})".format(tooth, point, number)
+    return described
+
+
+DESCRIPTIONS = _describe_landmarks()
+
 # Jaw a Universal tooth number belongs to.
 JAW_OF_NUMBER = {
     number: jaw for jaw, teeth in UNIVERSAL_NUMBERS.items() for number in teeth.values()
 }
 
 JAWS = ("Upper", "Lower")
+
+
+# ---------------------------------------------------------------------------
+# The landmarks, one by one
+# ---------------------------------------------------------------------------
+
+
+def _landmarks_of(network: str, jaw: str) -> tuple:
+    """Every landmark `network` predicts on `jaw`, in the label tables' order."""
+    return tuple(
+        label
+        for number, names in LABELS[network].items()
+        if JAW_OF_NUMBER[int(number)] == jaw
+        for label in names
+    )
+
+
+# Tab -> the landmarks it holds. Derived from the label tables above, never
+# restated: a landmark added to one appears in its tab with no edit here and no
+# client release.
+#
+# Family x jaw rather than family alone because a family is 84 check boxes
+# while an intraoral scan is one arch -- the 42 maxillary options are noise
+# beside a mandible. A group with no landmarks is dropped rather than shown
+# empty, which is what keeps Mucogingival, trained on the mandible alone, from
+# offering an upper tab nothing could ever fill.
+LANDMARK_GROUPS = {
+    f"{display} {jaw}": _landmarks_of(code, jaw)
+    for display, code in NETWORK_NAMES.items()
+    for jaw in JAWS
+    if _landmarks_of(code, jaw)
+}
+
+# Every landmark this tool can place, in the order the tabs present them.
+LANDMARKS = tuple(label for labels in LANDMARK_GROUPS.values() for label in labels)
+
+# Landmark -> the network that predicts it. The three tables share no name -- a
+# test pins that -- so one label names exactly one forward pass; a collision
+# would make a selection ambiguous rather than merely wrong.
+LANDMARK_NETWORK = {
+    label: network
+    for network, table in LABELS.items()
+    for names in table.values()
+    for label in names
+}
 
 
 def network_codes(selection) -> tuple:
@@ -146,3 +262,36 @@ def network_codes(selection) -> tuple:
                 f"Unknown IOS landmark family {name!r}. Known: {', '.join(NETWORK_NAMES)}."
             )
     return tuple(code for code in NETWORK_CODES if code in set(codes))
+
+
+def resolve_landmarks(selection) -> tuple:
+    """`(recognised, unknown)` for what `run()` received for `landmarks`.
+
+    Empty is the ordinary case and means "not specified": the networks decide,
+    which is what every request written before this argument existed relies on.
+
+    Unlike ALI_CBCT's counterpart, a name this catalog does not know CANNOT be
+    honoured here: a network emits a fixed set of channels and there is no
+    bundle-provided extra to fall back on. Unknown names are returned rather
+    than dropped, so the run report can say what the selection did not buy.
+
+    Recognised names come back in declaration order, not the caller's, so the
+    report reads the same way however the request was assembled.
+    """
+    if not selection:
+        return (), ()
+    wanted = set(selection)
+    recognised = tuple(label for label in LANDMARKS if label in wanted)
+    return recognised, tuple(sorted(wanted - set(recognised)))
+
+
+def networks_for(labels) -> tuple:
+    """The networks that must run to produce these landmarks.
+
+    This is what makes naming landmarks cheaper than naming the family they
+    belong to: asking for the 13 mucogingival points runs the MG pass alone,
+    and never the occlusal and cervical passes the default would have run over
+    every mesh.
+    """
+    wanted = {LANDMARK_NETWORK[label] for label in labels if label in LANDMARK_NETWORK}
+    return tuple(code for code in NETWORK_CODES if code in wanted)

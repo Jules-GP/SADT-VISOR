@@ -32,7 +32,7 @@ import shutil
 from sadt_areg_common.errors import ToolInputError
 
 from sadt_areg_common import catalogs, pairing
-from . import tools
+from . import progress, tools
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,10 @@ def _run_ios(
         painter = ios_pipeline.MGLPainter(landmark_root, height=mgl_patch_height)
         report["mgl_patch_height_mm"] = mgl_patch_height
 
-    for key, jaws in sorted(matched.matched.items()):
+    for index, (key, jaws) in enumerate(sorted(matched.matched.items()), start=1):
+        # The counter, never the patient key: the key is built from the file
+        # names the caller sent, and a progress message is stored and shown.
+        progress.report(index, len(matched.matched), "subject")
         try:
             report["patients"][key] = ios_pipeline.register_patient(
                 jaws=jaws,

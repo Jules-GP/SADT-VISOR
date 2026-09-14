@@ -480,3 +480,44 @@ def test_real_model_segments_a_real_scan(tmp_path):
     values = set(np.unique(sitk.GetArrayFromImage(sitk.ReadImage(str(labels)))).tolist())
     assert values - {0}, "the network emitted at least one structure"
     assert values <= {0} | set(report["labels"].values()), "no label outside the table"
+
+
+# ---------------------------------------------------------------------------
+# Progress -- both ends of a run whose middle is opaque
+# ---------------------------------------------------------------------------
+
+def test_progress_reports_the_two_ends_and_says_nothing_it_cannot_know(
+    tmp_path, stub_nnunet, monkeypatch
+):
+    """The whole cohort goes to nnUNet in ONE call, so there is no per-scan
+    position to report between the reading and the writing.
+
+    The bar therefore stops at 10% for the length of the segmentation. That is
+    the truth: interpolating a position from the number of scans would put a
+    number on the bar that nothing in the run measured, and the moment one scan
+    took twice as long as another it would be wrong in a way nobody could see.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    stub_nnunet()
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _write_scan(str(tmp_path / "in" / "p2.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+
+    pipeline.segment(
+        output_dir=str(tmp_path / "out"),
+        input_path=str(tmp_path / "in"),
+        model_path=str(tmp_path / "models" / "DentalSegmentator"),
+    )
+
+    events = [json.loads(line) for line in
+              Path(events_file).read_text().splitlines() if line]
+    assert [event["message"] for event in events] == [
+        "reading scan 1 of 2", "reading scan 2 of 2",
+        "segmenting 2 scan(s) in one pass",
+        "writing scan 1 of 2", "writing scan 2 of 2",
+    ]
+    fractions = [event["fraction"] for event in events]
+    assert fractions == sorted(fractions)
+    # The scan's own name is patient metadata and never travels in a message.
+    assert not any("p1" in event["message"] for event in events)

@@ -39,6 +39,8 @@ import os
 import shutil
 
 from . import catalogs
+from . import markups
+from . import progress
 from .scans import split_scan_extension
 from .cbct import dicom
 from .cbct import pipeline as cbct_pipeline
@@ -58,6 +60,7 @@ WORK_DIRNAME = ".aso_work"
 # the call graph stays inspectable, where `sup.ALI(...)` is an AttributeError
 # fifteen minutes into a job.
 LANDMARK_TOOL = "ALI_CBCT"
+
 
 
 class OrientationRun:
@@ -160,6 +163,17 @@ def orient(
     try:
         input_root = _as_directory(input_path, os.path.join(work_dir, "input"))
         reference_root = _as_directory(reference_path, os.path.join(work_dir, "reference"))
+        # Either a bundle, or the folder that HOLDS the bundles. The server
+        # fills a hidden hosted-model argument with the whole of
+        # `DATA/ASO/models/`, so both shapes arrive here and the difference is
+        # visible: a bundle carries markups, a folder of bundles does not.
+        if not _is_reference_bundle(reference_root):
+            reference_root = choose_reference(
+                reference_root,
+                modality,
+                selection["cbct_landmarks"] if modality == catalogs.MODALITY_CBCT else [],
+            )
+            report["reference"] = os.path.basename(reference_root.rstrip(os.sep))
 
         if modality == catalogs.MODALITY_CBCT:
             _run_cbct(
@@ -253,13 +267,6 @@ def _check_cbct(
             f"yourself in 'landmarks' (a folder of .mrk.json files, which is what "
             f"'{LANDMARK_TOOL}' produces), or use Semi-Automated mode."
         )
-    if not landmark_model:
-        raise ToolInputError(
-            f"Fully-Automated CBCT needs 'landmark_model': the model bundle "
-            f"'{LANDMARK_TOOL}' predicts with. It used to be optional because the server "
-            f"picked a bundle matching the input; a tool no longer resolves paths, so the "
-            f"bundle has to be named."
-        )
 
 
 def _no_landmarks_reason(key: str, markups_paths: list, orphans: list) -> str:
@@ -293,6 +300,136 @@ def _no_landmarks_reason(key: str, markups_paths: list, orphans: list) -> str:
         "send the whole FOLDER rather than the single scan file, pass them in "
         "'landmarks', or use Fully-Automated mode to have them predicted"
     )
+
+
+def choose_reference(models_root: str, modality: str, requested: list) -> str:
+    """The reference bundle inside `models_root`, chosen by what it carries.
+
+    There is no choice here for a clinician to make, and that is the point. A
+    reference defines the target frame through what it CARRIES, and the two
+    published CBCT bundles carry disjoint landmark sets -- Frankfurt Horizontal
+    + Midsagittal has Ba/S/N/RPo/LPo/ROr/LOr, Occlusal + Midsagittal has
+    ANS/IF/PNS/UL6O/UR1O/UR6O. So the selection already says which one applies;
+    asking again could only produce a pairing that fails every patient
+    separately, which is the failure `_check_selection_against_reference` exists
+    to explain.
+
+    The original extension asked for a FOLDER -- somewhere on the clinician's
+    own disk, with a button offering to download one of the two. Here the
+    bundles are on the server, so the folder question has no answer left to
+    give.
+
+    Each modality recognises its own shape, the way every engine in this project
+    recognises its own weights: a CBCT reference carries markups, an IOS one
+    carries labelled surfaces. A bundle of neither -- ALI's `.pth` files sit in
+    the same folder -- is not a reference and is never offered.
+    """
+    markups_bundles, surface_bundles = {}, []
+    for name in sorted(os.listdir(models_root)):
+        directory = os.path.join(models_root, name)
+        if not os.path.isdir(directory):
+            continue
+        # Surfaces decide, not the absence of markups: the published intraoral
+        # bundle carries BOTH -- `Upper_gold.vtk` beside `Upper_gold.json` --
+        # and classifying it by its markups would file the one IOS reference
+        # under CBCT. A CBCT bundle carries markups beside a VOLUME, never a
+        # mesh, so "has a mesh" separates them with nothing left over.
+        if _holds_surfaces(directory):
+            surface_bundles.append(name)
+            continue
+        landmarks = _reference_landmarks(directory)
+        if landmarks:
+            markups_bundles[name] = landmarks
+
+    if modality == catalogs.MODALITY_IOS:
+        return _only_one(models_root, surface_bundles, "intraoral")
+
+    wanted = set(requested)
+    fits = sorted(name for name, labels in markups_bundles.items()
+                  if wanted and wanted <= set(labels))
+    if len(fits) == 1:
+        return os.path.join(models_root, fits[0])
+    if not markups_bundles:
+        raise ToolInputError(
+            "No CBCT reference bundle on this server. Stage one with "
+            "`setup-models.sh --tool ASO`."
+        )
+    offered = "; ".join(
+        "'{}' carries {}".format(name, ", ".join(sorted(labels)))
+        for name, labels in sorted(markups_bundles.items())
+    )
+    if not fits:
+        raise ToolInputError(
+            "No reference on this server carries every landmark you selected "
+            "({}). {}. Select landmarks one of them supports.".format(
+                ", ".join(sorted(wanted)) or "none", offered)
+        )
+    raise ToolInputError(
+        "Several references carry the landmarks you selected, so which target "
+        "frame to orient onto is ambiguous: {}. Name one in 'reference'.".format(
+            ", ".join(fits))
+    )
+
+
+def _only_one(models_root: str, names: list, what: str) -> str:
+    """The single bundle of its kind, or a refusal naming what was found."""
+    if len(names) == 1:
+        return os.path.join(models_root, names[0])
+    if not names:
+        raise ToolInputError(
+            "No {} reference bundle on this server. Stage one with "
+            "`setup-models.sh --tool ASO`.".format(what)
+        )
+    raise ToolInputError(
+        "Several {} reference bundles are staged, so which one to orient onto "
+        "is ambiguous: {}. Name one in 'reference'.".format(what, ", ".join(sorted(names)))
+    )
+
+
+def _reference_landmarks(directory: str) -> list:
+    """The labels the first markups file in `directory` holds, or []."""
+    for where, _subdirs, names in sorted(os.walk(directory)):
+        for name in sorted(names):
+            if markups.is_markups_file(name) and not name.startswith("."):
+                try:
+                    landmarks = markups.load_landmarks(os.path.join(where, name))
+                except Exception:  # noqa: BLE001 - unreadable is "not a bundle"
+                    continue
+                if landmarks:
+                    return list(landmarks)
+    return []
+
+
+def _is_reference_bundle(directory: str) -> bool:
+    """Whether this directory IS a reference, rather than the folder of them.
+
+    Answered on the TOP LEVEL only, and that is the whole trick: a bundle keeps
+    its markups or its meshes right there, while `DATA/ASO/models/` keeps only
+    directories. Asked recursively the models folder would look like a bundle,
+    because one of its children is.
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    return any(
+        markups.is_markups_file(name) or name.lower().endswith((".vtk", ".vtp", ".stl"))
+        for name in names
+        if os.path.isfile(os.path.join(directory, name))
+    )
+
+
+def _holds_surfaces(directory: str) -> bool:
+    """Whether anything under `directory` is a surface mesh.
+
+    What an IOS reference is: the engine takes tooth centroids off a labelled
+    mesh rather than reading landmarks from a file, so a bundle carrying no
+    markups at all is exactly right there and would be nothing anywhere else.
+    """
+    for _where, _subdirs, names in os.walk(directory):
+        if any(name.lower().endswith((".vtk", ".vtp", ".stl")) for name in names):
+            return True
+    return False
 
 
 def _check_selection_against_reference(requested: list, reference_landmarks: dict) -> None:
@@ -385,25 +522,36 @@ def _predict_landmarks(
     straddling two of the landmark tool's regions, so asking by region would run
     58 agents to use 7 -- and one agent is a full two-scale walk of the volume.
     """
-    output_dir = os.path.join(work_dir, "landmarks")
-
     if sup is not None and hasattr(sup, "progress"):
         sup.progress(0.2, f"predicting landmarks with {LANDMARK_TOOL}")
 
+    # Only the landmarks are asked for. Which weights place them is that tool's
+    # business, and it finds its own -- this used to compose a path into ALI's
+    # data folder, which meant ASO holding a name for its neighbour's storage.
+    # `landmark_model` survives as an OVERRIDE: a caller pinning a bundle is
+    # recording which weights ran, and is obeyed.
+    # No `output_dir`: where a supervised tool writes is the supervisor's, the
+    # same way it is the server's over HTTP. Pointing it into this run's scratch
+    # is what used to delete the predicted landmarks before anyone could ask to
+    # keep them -- `keep_intermediate` collects from the supervisor's own folder.
     produced = sup.run(
         LANDMARK_TOOL,
         input=centered_root,
-        model=landmark_model,
-        output_dir=output_dir,
         landmarks=list(requested),
         prediction_ID="Pred",
+        **({"model": landmark_model} if landmark_model else {}),
     )
     # A tool returns a Path, or a dict of named ones. The landmark tool returns
     # its output directory; a dict is accepted so a future one naming its
     # outputs does not break the call.
     if isinstance(produced, dict):
         produced = next(iter(produced.values()))
-    return _collect(str(produced) if produced else output_dir)
+    if not produced:
+        raise ToolInputError(
+            "'{}' returned no output directory, so there are no predicted "
+            "landmarks to read.".format(LANDMARK_TOOL)
+        )
+    return _collect(str(produced))
 
 
 # A tool's own run report sits beside its results and is NOT a markups file --
@@ -435,7 +583,15 @@ def _collect(output_dir: str) -> dict:
             try:
                 found = markups.load_landmarks(os.path.join(directory, file_name))
             except (ValueError, OSError) as exc:
-                logger.warning("Skipping '%s': %s", file_name, exc)
+                # No name and no message: these files are named after the
+                # caller's scans, and the ValueError `markups.load_landmarks`
+                # raises quotes that name. There is no position to give either
+                # -- this is a walk of a tree, not a pass over a batch -- so
+                # the failure's type is the whole diagnosis.
+                logger.warning(
+                    "Skipping a landmark file the landmark tool wrote: %s",
+                    type(exc).__name__,
+                )
                 continue
             predictions.setdefault(key, {}).update(found)
     return predictions
@@ -449,7 +605,12 @@ def _run_cbct(
     input_root, reference_root, automation, requested, landmarks_path, landmark_model,
     dicom_input, output_dir, work_dir, suffix, max_triplets, seed, report, sup,
 ) -> None:
-    if dicom_input:
+    # Asked of the DATA, not of the caller. DICOM slices routinely carry no
+    # extension, so a clinician could not tell from a file name either -- and
+    # answering wrong produced a run that failed for a reason nobody could see.
+    # `dicom_input` remains an OVERRIDE for a caller who knows better than the
+    # detector, which is why it stays in the signature and leaves the panel.
+    if dicom_input or dicom.holds_a_series(input_root):
         input_root = dicom.convert_tree(input_root, os.path.join(work_dir, "dicom_nifti"))
 
     reference_landmarks = cbct_pipeline.load_reference(reference_root)
@@ -474,9 +635,43 @@ def _run_cbct(
     # repository checkout -- see README.md.
     supplied = _as_directory(landmarks_path, os.path.join(work_dir, "landmarks_in")) \
         if landmarks_path else None
-    fully = automation == catalogs.AUTOMATION_FULLY and supplied is None
+    by_patient = _collect(supplied) if supplied else None
+
+    # Decided PER PATIENT, from what each one came with. A landmark file beside
+    # a scan, or in the folder the caller supplied, is landmarks to register on;
+    # a scan with none is one to predict for. The caller used to say which, and
+    # saying it wrong was silent -- a fully-automated run over landmarks already
+    # on disk predicted them again, and a semi-automated one over scans with
+    # none failed patient by patient with "no landmarks".
+    #
+    # `automation` survives as an OVERRIDE: writing Fully-Automated when
+    # landmarks exist is asking for them to be ignored, which is a legitimate
+    # thing to want and is now the only thing this argument does.
+    forced = automation == catalogs.AUTOMATION_FULLY
+
+    def _needs_prediction(key):
+        # A folder the caller SUPPLIED wins over everything, including the mode.
+        # That precedence is what lets this tool run standalone -- predict the
+        # landmarks yourself, pass the folder, no supervisor needed -- and
+        # reversing it would make `Fully-Automated` throw away points a caller
+        # went out of their way to hand over.
+        if by_patient is not None:
+            return not by_patient.get(key)
+        if forced:
+            return True
+        return not patients[key]["markups"]
+
+    # Only where predicting is POSSIBLE. With no supervisor there is no landmark
+    # tool to ask, and a patient with no landmarks then fails on its own terms --
+    # "no landmarks for this patient", which is true and actionable -- instead of
+    # taking the batch down inside a call that was never going to work.
+    to_predict = ({key for key in patients if _needs_prediction(key)}
+                  if sup is not None else set())
+    fully = bool(to_predict)
     report["landmark_source"] = (
-        LANDMARK_TOOL if fully else ("supplied" if supplied else "alongside the scans")
+        LANDMARK_TOOL if len(to_predict) == len(patients)
+        else ("supplied" if supplied else "alongside the scans") if not to_predict
+        else "mixed"
     )
 
     # Landmark files that matched no scan. Collected even on a run that
@@ -505,14 +700,20 @@ def _run_cbct(
     # the Slicer chain did, PRE_ASO_CBCT before ALI_CBCT), so in fully-automated
     # mode they have to reach disk before it is called.
     prepared = {}
-    for key, entry in sorted(patients.items()):
+    # Three phases share the bar, and each is given the slice it occupies so
+    # the second does not send it back to zero. The boundaries are where the
+    # landmark waypoint below already put them: recentring up to 0.2, the
+    # landmark tool from there, registration on the tail. What is exact is the
+    # counter in the message; the split between phases is a weighting.
+    for index, (key, entry) in enumerate(sorted(patients.items()), start=1):
+        progress.report(index, len(patients), "centring scan", end=0.2)
         _, extension = split_scan_extension(os.path.basename(entry["scan"]))
         destination = (
             os.path.join(
                 centered_root,
                 f"{key}{cbct_pipeline.compressed_extension(extension)}",
             )
-            if fully
+            if key in to_predict
             else None
         )
         try:
@@ -521,7 +722,9 @@ def _run_cbct(
             report["patients"][key] = {"status": "failed", "reason": str(exc)}
             continue
         prepared[key] = {
-            "image": None if fully else image,  # kept in RAM only when it is used next
+            # Kept in RAM only when it is used next -- a predicted patient's
+            # scan is read from disk by the landmark tool instead.
+            "image": None if key in to_predict else image,
             "translation": translation,
             "extension": extension,
             "centered_path": destination,
@@ -531,27 +734,34 @@ def _run_cbct(
     # Phase 2 -- landmarks, either the caller's (moved into the centred space)
     # or predicted ones (already in it, because the tool ran on the centred
     # scans).
-    if fully:
-        predictions = _predict_landmarks(
-            centered_root, landmark_model, requested, work_dir, sup
-        )
-        for key, entry in prepared.items():
+    # ONE call for every scan that needs predicting, not one per patient: the
+    # landmark tool loads its agents once and walks a folder, so a cohort costs
+    # what a cohort costs rather than N times a single scan.
+    predictions = (
+        _predict_landmarks(centered_root, landmark_model, requested, work_dir, sup)
+        if to_predict else {}
+    )
+    for key, entry in prepared.items():
+        if key in to_predict:
+            # Already in the centred space: the tool ran on the centred scans.
             entry["landmarks"] = predictions.get(key, {})
-    else:
-        # Merged per patient, then moved into the centred space -- the landmarks
-        # describe the ORIGINAL volume, wherever they came from, and the
-        # registration compares them against a centred one.
-        by_patient = _collect(supplied) if supplied else None
-        for key, entry in prepared.items():
-            found = (
-                by_patient.get(key, {})
-                if by_patient is not None
-                else cbct_pipeline.load_landmarks(patients[key]["markups"])
-            )
-            entry["landmarks"] = cbct_pipeline.center_landmarks(found, entry["translation"])
+            continue
+        # The caller's, moved into the centred space -- they describe the
+        # ORIGINAL volume, wherever they came from, and the registration
+        # compares them against a centred one.
+        found = (
+            by_patient.get(key, {})
+            if by_patient is not None
+            else cbct_pipeline.load_landmarks(patients[key]["markups"])
+        )
+        entry["landmarks"] = cbct_pipeline.center_landmarks(found, entry["translation"])
 
-    # Phase 3 -- register and write.
-    for key, entry in sorted(prepared.items()):
+    # Phase 3 -- register and write. It starts where the landmark tool left
+    # off, which is only where semi-automated ends its own phase 1: there is no
+    # prediction between them, so the bar must not skip the slice it never used.
+    registration_start = 0.6 if fully else 0.2
+    for index, (key, entry) in enumerate(sorted(prepared.items()), start=1):
+        progress.report(index, len(prepared), "orienting patient", start=registration_start)
         if not entry["landmarks"]:
             report["patients"][key] = {
                 "status": "failed",
@@ -594,8 +804,9 @@ def _run_ios(
     input_root, reference_root, automation, teeth, landmark_types, jaws, occlusion,
     output_dir, suffix, max_triplets, seed, report,
 ) -> None:
-    fully = automation == catalogs.AUTOMATION_FULLY
-    reference = ios_pipeline.load_reference(reference_root, need_surfaces=fully)
+    # Which form each jaw needs is decided per jaw now, so the reference is
+    # loaded with both and each branch says what it is missing.
+    reference = ios_pipeline.load_reference(reference_root)
 
     patients = ios_pipeline.discover(input_root, suffix)
     patients = {key: entry for key, entry in patients.items() if _has_surface(entry)}
@@ -607,14 +818,17 @@ def _run_ios(
         )
 
     report["requested_teeth"] = list(teeth)
-    if not fully:
-        report["requested_landmark_types"] = list(landmark_types)
+    # Both are reported: which one a jaw used is decided per jaw, so a cohort
+    # can legitimately have registered some on landmarks and some on centroids,
+    # and a reader has to be able to see what was asked for either way.
+    report["requested_landmark_types"] = list(landmark_types)
 
     selected_teeth = catalogs.split_by_jaw(teeth)
     landmark_keys = catalogs.landmark_keys_by_jaw(teeth, landmark_types)
     driving = catalogs.DRIVING_JAW[occlusion]
 
-    for key, entry in sorted(patients.items()):
+    for index, (key, entry) in enumerate(sorted(patients.items()), start=1):
+        progress.report(index, len(patients), "orienting patient")
         report["patients"][key] = ios_pipeline.orient_patient(
             jaws=entry,
             reference=reference,
@@ -630,8 +844,10 @@ def _run_ios(
             seed=seed,
         )
 
-    if fully:
-        _reject_if_nothing_was_labelled(report["patients"])
+    # Unconditional now. It only fires when EVERY jaw failed for want of tooth
+    # labels, which can only happen on the centroid path -- there is no mode to
+    # test for any more.
+    _reject_if_nothing_was_labelled(report["patients"])
 
 
 def _has_surface(entry: dict) -> bool:
@@ -647,8 +863,8 @@ def _reject_if_nothing_was_labelled(patients: dict) -> None:
     """Turn "not one of your meshes is segmented" into an input error.
 
     The distinction matters, and only these two cases are treated differently.
-    No labelled mesh at all means the caller chose the wrong mode, and saying so
-    is more use than an empty output folder. Some meshes labelled and others not
+    No labelled mesh at all is a cohort that cannot be oriented at all, and
+    saying so is more use than an empty output folder. Some meshes labelled and others not
     is a data problem: those are recorded per patient and the rest of the batch
     is kept, because "one of your forty meshes was bad" is not a reason to
     return nothing.
@@ -665,10 +881,11 @@ def _reject_if_nothing_was_labelled(patients: dict) -> None:
     if not reasons or not all(_UNLABELLED in reason for reason in reasons):
         return
     raise ToolInputError(
-        "Fully-Automated IOS orients a mesh by its tooth labels, and none of the "
-        "meshes sent carries a per-point array named one of "
-        f"{', '.join(ios_pipeline.markups.LABEL_ARRAY_NAMES)}. Run 'Crown_Seg' over "
-        "them first, or use Semi-Automated mode with landmark files."
+        "None of these meshes carries landmarks, so each was oriented by its "
+        "tooth centroids -- and none carries a per-point label array named one "
+        f"of {', '.join(ios_pipeline.markups.LABEL_ARRAY_NAMES)} either, so there "
+        "are no centroids to take. Run 'Crown_Seg' over them first, or put a "
+        "landmark file beside each mesh."
     )
 
 

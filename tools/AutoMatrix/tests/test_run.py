@@ -1,6 +1,7 @@
 """AutoMatrix on synthetic volumes: SimpleITK does the work, for real."""
 
 import json
+import logging
 import os
 import sys
 
@@ -222,3 +223,242 @@ def test_the_refusal_carries_why_nothing_was_written(tmp_path):
     with pytest.raises(ValueError, match="neither an ITK transform"):
         sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
                             output_dir=tmp_path / "out")
+
+
+def test_a_batch_says_which_patient_it_is_on(tmp_path, monkeypatch):
+    """One event per patient -- including one that has no transform.
+
+    The loop reports before it decides whether there is anything to do, which
+    is what keeps the count in the message equal to the count a caller sent.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _volume(tmp_path / "in" / "P1_T1.nii.gz")
+    _volume(tmp_path / "in" / "P2_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_transform.tfm")
+
+    sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                        output_dir=tmp_path / "out")
+
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert [e["message"] for e in events] == ["patient 1 of 2", "patient 2 of 2"]
+    assert [e["fraction"] for e in events] == [0.0, 0.5]
+
+
+def test_a_failure_names_the_position_and_never_the_file(tmp_path, caplog):
+    """Both counters, and never the name the caller gave the file.
+
+    A tool's stderr is captured to a file in the job directory, and on a FAILED
+    run the server copies its tail into its own persistent log -- so a name
+    written on this path outlives the run and its job directory. The report
+    still names the file under `failed`; that goes back to whoever sent it.
+    """
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "MAMP_0001_T1.nii.gz").write_bytes(b"not a volume at all")
+    _transform(tmp_path / "tfm" / "MAMP_0001_transform.tfm")
+    _volume(tmp_path / "in" / "P2_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P2_transform.tfm")
+
+    with caplog.at_level(logging.INFO, logger="AutoMatrix"):
+        sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                            output_dir=tmp_path / "out")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "AutoMatrix failed on patient 1 of 2, file 1 of 1" in messages, messages
+    assert not any("MAMP_0001" in m for m in messages), messages
+
+    report = json.loads((tmp_path / "out" / "AutoMatrix_report.json").read_text())
+    assert report["patients"]["MAMP_0001"]["failed"], "the report still names it"
+
+
+# ---------------------------------------------------------------------------
+# Compatibility with SlicerAutomatedDentalTools.
+#
+# All four of the datasets published with the legacy module paired under its
+# rules and under none of this port's, so every one of them transformed nothing.
+# These pin the fallback that fixes that, and -- the case that matters more --
+# that it stays a fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_names_pair_as_a_fallback(tmp_path):
+    """Upstream cuts a name at `_Left`; this port keeps whole tokens.
+
+    `P1_T1_Left_MA.tfm` keys to `P1_Left_MA` here and to `P1` upstream, so
+    without the fallback this pairs with nothing.
+    """
+    _volume(tmp_path / "in" / "P1_T1_.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_T1_Left_MA.tfm")
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                              output_dir=tmp_path / "out")
+
+    report = json.loads((out / "AutoMatrix_report.json").read_text())
+    assert report["summary"]["files_written"] == 1
+    assert report["paired_by"] == {"P1": "legacy file names"}
+
+
+def test_one_transform_reaches_a_cohort_only_when_asked(tmp_path):
+    """The mirror matrix: it belongs to no patient, so no name can pair it.
+
+    VFACE drives exactly this eight times a run, one `Mirror.tfm` against a
+    folder of patients. Upstream infers it from the argument being a single
+    FILE; here the caller says so, because the same shape is what a mislabelled
+    per-patient transform looks like.
+    """
+    _volume(tmp_path / "in" / "P1_T1.nii.gz")
+    _volume(tmp_path / "in" / "P2_T1.nii.gz")
+    _transform(tmp_path / "Mirror.tfm")
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "Mirror.tfm",
+                              output_dir=tmp_path / "out",
+                              same_transform_for_every_patient=True)
+
+    report = json.loads((out / "AutoMatrix_report.json").read_text())
+    assert report["summary"]["files_written"] == 2
+    assert set(report["paired_by"]) == {"P1", "P2"}
+    assert report["without_a_transform"] == []
+
+
+def test_a_cohort_is_never_given_one_transform_by_guess(tmp_path):
+    """The failure that must stay loud, for the tools that will call this.
+
+    One transform, three patients, a name neither rule recognises. Guessing
+    puts one patient's matrix on everybody and reports a clean success -- the
+    legacy module's own callers were bitten by precisely this. Refusing is the
+    behaviour this port had before the compatibility fallback existed, and it
+    is kept.
+    """
+    for name in ("alpha", "beta", "gamma"):
+        _volume(tmp_path / "in" / f"{name}_T1.nii.gz")
+    _transform(tmp_path / "alpha-subject.tfm")
+
+    with pytest.raises(ValueError, match="transformed nothing"):
+        sadt_automatrix.run(files=tmp_path / "in",
+                            transforms=tmp_path / "alpha-subject.tfm",
+                            output_dir=tmp_path / "out")
+
+
+def test_one_transform_and_one_patient_needs_no_flag(tmp_path):
+    """Nothing else it could belong to, so there is no guess to refuse.
+
+    This is what makes the legacy module's single-file datasets run unchanged.
+    """
+    _volume(tmp_path / "in" / "P1_T1.nii.gz")
+    _transform(tmp_path / "anything.tfm")
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "anything.tfm",
+                              output_dir=tmp_path / "out")
+
+    assert json.loads((out / "AutoMatrix_report.json").read_text())[
+        "summary"]["files_written"] == 1
+
+
+def test_the_fallback_never_overrides_a_pair_this_port_found(tmp_path):
+    """The guarantee the whole design rests on: additive, never a replacement.
+
+    One transform names P1 and two patients are present. Upstream would give it
+    to both -- a single file is broadcast there whatever the names say. Here the
+    normal rule pairs P1, so the fallback is never reached and P2 keeps having
+    no transform, exactly as it did before the fallback existed.
+    """
+    _volume(tmp_path / "in" / "P1_T1.nii.gz")
+    _volume(tmp_path / "in" / "P2_T1.nii.gz")
+    _transform(tmp_path / "P1_transform.tfm")
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "P1_transform.tfm",
+                              output_dir=tmp_path / "out")
+
+    report = json.loads((out / "AutoMatrix_report.json").read_text())
+    assert report["summary"]["files_written"] == 1
+    assert report["without_a_transform"] == ["P2"]
+    assert "paired_by" not in report, "the fallback ran when it was not needed"
+
+
+# ---------------------------------------------------------------------------
+# Scan or segmentation, read off the file.
+#
+# The argument was per RUN, so a folder holding both could never be right for
+# both, and a clinician had to answer a question about interpolation to use the
+# tool at all. What settles it is in the data: a label map holds tens of whole,
+# non-negative values where a CBCT holds thousands and reaches below zero.
+# ---------------------------------------------------------------------------
+
+
+def _labelled(path):
+    """A volume that is a label map by content: two structures, no background
+    gradient, nothing negative."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = np.zeros((8, 8, 8), np.int16)
+    array[2:5, 2:6, 2:6] = 1
+    array[5:8, 2:6, 2:6] = 3
+    sitk.WriteImage(sitk.GetImageFromArray(array), str(path))
+    return path
+
+
+def _scanlike(path):
+    """A volume that is a scan by content: Hounsfield numbers, negatives and all."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = (np.arange(8 * 8 * 8).reshape(8, 8, 8) * 7 - 1000).astype(np.int16)
+    sitk.WriteImage(sitk.GetImageFromArray(array), str(path))
+    return path
+
+
+def _outputs(out):
+    report = json.loads((out / "AutoMatrix_report.json").read_text())
+    return {o["file"]: o for entry in report["patients"].values()
+            for o in entry["outputs"]}
+
+
+def test_a_label_map_is_recognised_and_never_blended(tmp_path):
+    _labelled(tmp_path / "in" / "P1_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_transform.tfm", translation=(0.3, 0.3, 0.3))
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                              output_dir=tmp_path / "out")
+
+    assert _outputs(out)["P1_T1_Reg.nii.gz"]["detected"] == "segmentation"
+    written = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P1_T1_Reg.nii.gz")))
+    assert set(np.unique(written)) <= {0, 1, 3}, "a label nobody segmented was invented"
+
+
+def test_a_scan_is_recognised_by_what_is_in_it(tmp_path):
+    _scanlike(tmp_path / "in" / "P1_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_transform.tfm", translation=(0.3, 0.3, 0.3))
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                              output_dir=tmp_path / "out")
+
+    assert _outputs(out)["P1_T1_Reg.nii.gz"]["detected"] == "scan"
+
+
+def test_one_folder_of_both_is_resampled_each_its_own_way(tmp_path):
+    """What the per-run argument could never do, and the reason for the change.
+
+    VFACE runs AutoMatrix once per structure precisely because one answer had to
+    cover every file in the folder.
+    """
+    _labelled(tmp_path / "in" / "P1_T1_Seg.nii.gz")
+    _scanlike(tmp_path / "in" / "P1_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_transform.tfm", translation=(0.3, 0.3, 0.3))
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                              output_dir=tmp_path / "out")
+
+    detected = {name: o["detected"] for name, o in _outputs(out).items()}
+    assert detected == {"P1_T1_Seg_Reg.nii.gz": "segmentation",
+                        "P1_T1_Reg.nii.gz": "scan"}
+
+
+def test_a_caller_who_names_the_content_is_believed(tmp_path):
+    """The escape hatch, and it must beat the data: a volume that LOOKS like a
+    label map but is meant as a scan is resampled linearly when asked."""
+    _labelled(tmp_path / "in" / "P1_T1.nii.gz")
+    _transform(tmp_path / "tfm" / "P1_transform.tfm", translation=(0.3, 0.3, 0.3))
+
+    out = sadt_automatrix.run(files=tmp_path / "in", transforms=tmp_path / "tfm",
+                              output_dir=tmp_path / "out", content="Scan")
+
+    assert "detected" not in _outputs(out)["P1_T1_Reg.nii.gz"]
+    written = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P1_T1_Reg.nii.gz")))
+    assert 2 in set(np.unique(written)), "the named content was overruled by the data"

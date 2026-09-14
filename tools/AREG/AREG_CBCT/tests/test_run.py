@@ -516,3 +516,73 @@ def test_fully_automated_without_segmentation_weights_is_refused_up_front():
             segmentation_model=None,
             sup=FakeSup("/tmp/areg-rules"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Progress -- one region at a time over the whole cohort
+# ---------------------------------------------------------------------------
+
+def _events(path) -> list:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+
+
+def test_progress_names_the_region_and_counts_the_subjects(tmp_path, monkeypatch):
+    """Two loops, nested, and the bar has to cross them once rather than twice.
+
+    Each region is given its own slice of the run: without that the second
+    region sends the fraction back to zero, which a watcher reads as a run
+    starting over. The region is named because it is anatomy; the subject is
+    only ever a number, the key being built from the caller's file names.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    TestSemiAutomatedCBCT._cohort(tmp_path, subjects=("P1", "P2"))
+
+    dispatch.register(
+        t1_path=str(tmp_path / "T1"),
+        t2_path=str(tmp_path / "T2"),
+        t1_masks_path=str(tmp_path / "masks"),
+        automation=catalogs.AUTOMATION_SEMI,
+        # Only the cranial base has a mask here, so the mandible costs no
+        # registration -- the events still have to be there for it.
+        regions=["Cranial base", "Mandible"],
+        output_dir=str(tmp_path / "out"),
+    )
+
+    events = _events(events_file)
+    assert [event["message"] for event in events] == [
+        "Cranial base: subject 1 of 2", "Cranial base: subject 2 of 2",
+        "Mandible: subject 1 of 2", "Mandible: subject 2 of 2",
+    ]
+    assert [event["fraction"] for event in events] == [0.0, 0.25, 0.5, 0.75]
+
+
+def test_progress_does_not_travel_through_the_supervisor(tmp_path, monkeypatch):
+    """`sup.progress` is not the channel, and that is the point of the design.
+
+    Eleven of the fifteen tools take no supervisor at all -- CONTRIBUTING tells
+    authors not to take one they do not need -- so making it the progress
+    channel would mean adding a supervisor to nine tools as a conduit. The
+    environment variable reaches all fifteen. `FakeSup.messages` records
+    everything a tool sends through the supervisor, and this tool sends none of
+    its progress that way.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    TestSemiAutomatedCBCT._cohort(tmp_path)
+    sup = FakeSup(tmp_path)
+
+    dispatch.register(
+        t1_path=str(tmp_path / "T1"),
+        t2_path=str(tmp_path / "T2"),
+        t1_masks_path=str(tmp_path / "masks"),
+        automation=catalogs.AUTOMATION_SEMI,
+        regions=["Cranial base"],
+        output_dir=str(tmp_path / "out"),
+        sup=sup,
+    )
+
+    assert sup.messages == []
+    assert [event["message"] for event in _events(events_file)] == [
+        "Cranial base: subject 1 of 1",
+    ]

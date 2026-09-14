@@ -366,3 +366,23 @@ def test_a_run_where_nothing_worked_still_writes_its_report(tmp_path):
         sadt_flexreg.run(surfaces=tmp_path, output_dir=tmp_path / "out", mode="Patch")
 
     assert (tmp_path / "out" / "FlexReg_report.json").is_file()
+
+
+def test_a_batch_says_which_surface_it_is_on(tmp_path, monkeypatch):
+    """One event per surface, rising, and the position rather than the name.
+
+    Two patients here are both called `arch.vtk`, which is exactly why the
+    message carries the counter: the name identifies neither the patient nor
+    the position, and it is patient metadata besides.
+    """
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv("SADT_PROGRESS_FILE", str(events_file))
+    _write_surface(tmp_path / "in" / "p1" / "arch.vtk")
+    _write_surface(tmp_path / "in" / "p2" / "arch.vtk")
+
+    sadt_flexreg.run(surfaces=tmp_path / "in", output_dir=tmp_path / "out",
+                     mode="Patch", patch="Mucogingival line")
+
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line]
+    assert [e["message"] for e in events] == ["surface 1 of 2", "surface 2 of 2"]
+    assert [e["fraction"] for e in events] == [0.0, 0.5]

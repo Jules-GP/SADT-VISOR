@@ -149,7 +149,9 @@ def load_measurements(measurements: Path):
             raise FileNotFoundError(
                 f"No CSV, XLSX or ODS file found in: {measurements}"
             )
-        logger.info(f"Loading {len(files)} table(s) from {measurements}")
+        # The count, never the path: `measurements` is the caller's own
+        # folder, unpacked under its own name, so it can carry a patient's.
+        logger.info(f"Loading {len(files)} table(s) from the input folder")
         return pd.concat([load_tabular_file(path) for path in files], ignore_index=True)
 
     if not measurements.is_file():

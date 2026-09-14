@@ -30,7 +30,18 @@ _OUTPUTS = "Outputs"
 
 LAYOUT = {
     "input": {"section": _INPUTS, "label": "Scan or Folder"},
-    "model": {"section": _INPUTS, "label": "Model Bundle"},
+    # Not rendered. This engine IS the CBCT one: there is exactly one bundle it
+    # can use, and asking a clinician which was asking a question with one
+    # answer. Worse, the facade composes ONE dropdown for both engines with
+    # nothing to tell them apart, so picking the intraoral bundle for a CBCT run
+    # was one click away -- and it happened.
+    #
+    # Left out of the request, the server hands this tool its models DIRECTORY
+    # and `engine.discover_weights` finds its own bundle inside: the CBCT layout
+    # is `<landmark>/<scale>/*.pth` and matches nothing the intraoral bundle
+    # holds. The argument stays required in run(), so a direct call with no
+    # server at all still works exactly as before.
+    "model": {"section": _INPUTS, "label": "Model Bundle", "hidden": True},
     # Not rendered, and this is the ONE hint here that is not about looks.
     # `SlicerAutomatedDentalTools` never offered a region selection: its
     # `ALI.ui` contains the word "region" zero times, and the anatomical groups
@@ -45,6 +56,11 @@ LAYOUT = {
     "regions": {"section": _LANDMARKS, "label": "Regions", "ui": "inline",
                 "hidden": True},
     "landmarks": {
+        # One line per landmark, so hovering `UR6MB` says which tooth and where
+        # on it. Sourced from Gillot et al. 2023 (PMC10440369) Table 1; a
+        # landmark the paper does not reach carries no line rather than a
+        # guessed one.
+        "option_help": catalog.DESCRIPTIONS,
         "section": _LANDMARKS,
         "label": "Individual landmarks",
         # 119 check boxes in one column is a scroll, not a choice. The tabs are

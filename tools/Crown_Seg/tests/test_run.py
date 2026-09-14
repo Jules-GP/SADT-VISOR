@@ -75,6 +75,7 @@ def stub_shapeaxi(monkeypatch, tmp_path):
                 "root": input_root,
                 "device": device,
                 "fdi": fdi,
+                "array_name": array_name,
             }
         )
         csv_stem = os.path.splitext(os.path.basename(csv_path))[0]
@@ -416,3 +417,97 @@ def test_the_workaround_is_a_no_op_once_upstream_puts_the_name_back():
 
     assert pipeline._restore_moved_class(fixed) is False
     assert fixed.DentalModelSeg is before
+
+
+# ---------------------------------------------------------------------------
+# The checkpoint, when nobody names one
+# ---------------------------------------------------------------------------
+
+def test_the_installed_checkpoint_is_used_when_none_is_named(tmp_path, stub_shapeaxi):
+    """A panel with no model field sends none, and the tool finds its own.
+
+    Left required, this was not merely a field too many: AREG IOS and IOSCBCT
+    call `label_crowns(sup, root, crown_model or "")`, `crown_model` is optional
+    on their own schemas, and the supervised call therefore omits `model` --
+    which used to be `TypeError: run() missing 1 required positional argument`.
+    """
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+    models = tmp_path / "data" / "Crown_Seg" / "models"
+    models.mkdir(parents=True)
+    (models / pipeline.PUBLISHED_CHECKPOINT).write_bytes(b"not a real checkpoint")
+
+    output = run(meshes=tmp_path / "cohort", output_dir=tmp_path / "out",
+                 data_root=tmp_path / "data")
+
+    report = json.loads((output / "run_report.json").read_text())
+    assert report["checkpoint"] == pipeline.PUBLISHED_CHECKPOINT
+    assert stub_shapeaxi[0]["model"].endswith(pipeline.PUBLISHED_CHECKPOINT)
+
+
+def test_a_named_checkpoint_still_wins_over_the_installed_one(tmp_path, stub_shapeaxi):
+    """Naming one is pinning which weights ran, and is obeyed."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+    models = tmp_path / "data" / "Crown_Seg" / "models"
+    models.mkdir(parents=True)
+    (models / pipeline.PUBLISHED_CHECKPOINT).write_bytes(b"not a real checkpoint")
+
+    run(meshes=tmp_path / "cohort", model=tmp_path / "model.pth",
+        output_dir=tmp_path / "out", data_root=tmp_path / "data")
+
+    assert stub_shapeaxi[0]["model"] == str(tmp_path / "model.pth")
+
+
+def test_no_model_and_no_data_root_says_which_of_the_two_is_missing(tmp_path, stub_shapeaxi):
+    """A checkout running this by hand, rather than a server publishing a data
+    root."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    with pytest.raises(ToolInputError, match="no data root"):
+        run(meshes=tmp_path / "cohort", output_dir=tmp_path / "out")
+
+
+# ---------------------------------------------------------------------------
+# The array name follows the numbering
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("numbering,expected", [
+    ("Universal", pipeline.DEFAULT_ARRAY_NAME),
+    ("FDI", pipeline.FDI_ARRAY_NAME),
+])
+def test_the_array_is_named_after_the_numbering(tmp_path, stub_shapeaxi, numbering, expected):
+    """shapeaxi's `ConvertFDI` rewrites the values in place under the SAME array
+    name, so asking for FDI produced an array called `Universal_ID` holding FDI
+    numbers. The two systems overlap almost completely -- FDI 18 is the upper
+    right third molar where Universal 18 is the lower left second molar -- so a
+    consumer did not fail, it read a different tooth."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    output = run(meshes=tmp_path / "cohort", model=tmp_path / "model.pth",
+                 output_dir=tmp_path / "out", numbering=numbering)
+
+    assert stub_shapeaxi[0]["array_name"] == expected
+    assert json.loads((output / "run_report.json").read_text())["array_name"] == expected
+
+
+def test_an_fdi_mesh_carries_no_name_the_consumers_know(tmp_path):
+    """The point of the rename: ALI's IOS landmarks, ASO, AREG and FlexReg all
+    look for the Universal spellings, so an FDI mesh is REFUSED there rather
+    than read as another set of teeth. None of them speaks FDI, and every
+    legacy caller passed `fdi: 0`."""
+    consumed = ("Universal_ID", "PredictedID", "UniversalID")
+
+    assert pipeline.FDI_ARRAY_NAME not in consumed
+    # Crown_Seg itself must still recognise its own output, or a second run
+    # would re-predict a batch it has already labelled.
+    assert pipeline.FDI_ARRAY_NAME in pipeline.LABEL_ARRAY_NAMES
+
+
+def test_a_named_array_still_wins(tmp_path, stub_shapeaxi):
+    """A caller that names one is choosing, and is obeyed -- which is what
+    keeps a request written against the old default working unchanged."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    run(meshes=tmp_path / "cohort", model=tmp_path / "model.pth",
+        output_dir=tmp_path / "out", numbering="FDI", array_name="Universal_ID")
+
+    assert stub_shapeaxi[0]["array_name"] == "Universal_ID"

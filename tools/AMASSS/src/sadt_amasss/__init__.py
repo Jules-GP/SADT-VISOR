@@ -11,6 +11,12 @@ from .catalog import merge_modes, structure_codes
 from .pipeline import segment
 
 
+# Two caveats that used to sit in `run()`'s docstring, and so in the panel:
+# the display names the old schema used ("Cranial base", ...) are still accepted
+# alongside the codes, so a client that has not moved keeps working; and a
+# single-structure run always writes the separate form, a "merged" volume of one
+# structure being just that structure. Both are contracts, neither is something
+# to read while choosing what to segment.
 def run(
     scans: Path,
     model: Path,
@@ -43,17 +49,9 @@ def run(
         output_dir: Where results are written -- one `<scan>_<ID>_SegOut/`
             folder per scan, plus `AMASSS_report.json`. Nothing is written
             outside it.
-        structures: Structures to segment: MAND (mandible), MAX (maxilla),
-            CB (cranial base), CV (cervical vertebra), UAW (upper airway),
-            SKIN, and the three masks CBMASK, MANDMASK, MAXMASK. Only the codes
-            are published as options, but the display names the old schema used
-            ("Cranial base", ...) are still accepted, so a client that has not
-            moved keeps working. A structure with no model in the bundle is
-            reported in `structures_without_model` rather than failing the run.
-        merge: MERGED for one multi-label file per scan, SEPARATE for one
-            binary file per structure. Both may be given. A single-structure
-            run always writes the separate form -- a "merged" volume of one
-            structure is just that structure.
+        structures: What to segment. One with no model in the bundle is
+            reported rather than failing the run.
+        merge: Which form the output takes; both may be given.
         prediction_ID: Suffix used in output names, e.g. `scan_Pred_MAND.nii.gz`.
         generate_surface: Also export a 3D surface (.vtk) beside each
             segmentation.

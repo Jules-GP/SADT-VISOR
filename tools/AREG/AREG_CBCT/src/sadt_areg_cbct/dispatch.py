@@ -32,7 +32,7 @@ import shutil
 from sadt_areg_common.errors import ToolInputError
 
 from sadt_areg_common import catalogs, pairing
-from . import dicom, tools
+from . import dicom, progress, tools
 
 logger = logging.getLogger(__name__)
 
@@ -174,9 +174,18 @@ def _run_cbct(
             f"{len(matched.t1_only)} T1-only and {len(matched.t2_only)} T2-only subject(s)."
         )
 
-    for code in codes:
+    # One region at a time over the whole cohort, so the bar is given each
+    # region's slice of the run rather than restarting per region. The region
+    # is named because it is anatomy; the subject is only ever a number.
+    for region_index, code in enumerate(codes):
         masks = cbct_pipeline.find_masks(mask_roots, code, scan_keys=matched.matched)
-        for key, entry in sorted(matched.matched.items()):
+        span = 1.0 / len(codes)
+        for index, (key, entry) in enumerate(sorted(matched.matched.items()), start=1):
+            progress.report(
+                index, len(matched.matched),
+                f"{catalogs.region_name(code)}: subject",
+                start=region_index * span, end=(region_index + 1) * span,
+            )
             record = report["patients"].setdefault(key, {"status": "ok", "regions": {}})
             mask_path = masks.get(key)
             if not mask_path:

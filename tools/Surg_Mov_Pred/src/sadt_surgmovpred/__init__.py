@@ -13,11 +13,36 @@ from pathlib import Path
 
 from .pipeline import predict
 
+# The DATA folder this tool's models live in: its own name. Written rather than
+# derived, because which folder holds which bundle is a deployment fact and a
+# wrong guess is a directory that is simply not there.
+_DATA_NAME = "Surg_Mov_Pred"
+
+
+def _own_models(data_root):
+    """`<root>/Surg_Mov_Pred/models`, or a refusal a caller can act on.
+
+    Handed straight to `load_model_packages`, which globs `**/*.pkl` under what
+    it is given -- so the packages being filed one level down, under a bundle
+    folder of their own, costs nothing here.
+    """
+    if data_root is None:
+        raise ValueError(
+            "No 'model' given and no data root to look in. Name the model "
+            "folder, or run this through a server that publishes one."
+        )
+    return Path(data_root) / _DATA_NAME / "models"
+
 
 def run(
     measurements: Path,
-    model: Path,
     output_dir: Path,
+    # After `output_dir` and optional: there is one published set of models and
+    # the tool loads every package it finds under it, so naming the folder was
+    # a step that could only be got wrong.
+    model: Path = "",
+    *,
+    data_root=None,
 ) -> dict[str, Path]:
     """Predict post-surgical skeletal movements from cephalometric measurements.
 
@@ -27,7 +52,9 @@ def run(
             patient identifier column ('#', 'ID', 'PatientID'...) is detected
             and carried into the output; without one the identifiers are blank.
         model: Folder of model packages, one subfolder per predicted
-            measurement, each holding a `stacking_package.pkl`.
+            measurement, each holding a `stacking_package.pkl`. Left empty,
+            this tool uses the models installed for it -- every package found
+            underneath, however they are filed.
         output_dir: Where the two result tables are written.
 
     Returns:
@@ -39,6 +66,8 @@ def run(
     # pay for it.
     return predict(
         measurements=Path(measurements),
-        model=Path(model),
+        # Its OWN models when nobody named a folder. A caller that names one
+        # is pinning which models ran and is obeyed.
+        model=Path(model) if model else _own_models(data_root),
         output_dir=Path(output_dir),
     )

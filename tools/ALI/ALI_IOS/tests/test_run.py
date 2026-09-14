@@ -195,3 +195,36 @@ def test_every_mucogingival_tooth_has_an_aim_offset():
         assert len(offset) == 3, tooth
         # Below the crown, always: the gingival margin is under it.
         assert offset[2] < 0, tooth
+
+
+# ---------------------------------------------------------------------------
+# Progress
+# ---------------------------------------------------------------------------
+
+def test_progress_writes_one_line_per_event_and_nothing_when_unset(tmp_path, monkeypatch):
+    """The engine's own loop cannot run here -- it needs pytorch3d, which
+    publishes no usable wheel -- so what is tested is this package's copy of
+    the helper the loop calls, on the contract every tool's copy holds to.
+    """
+    import json
+
+    from sadt_ali_ios import progress
+
+    monkeypatch.delenv(progress.VARIABLE, raising=False)
+    progress.report(1, 4, "mesh")  # a no-op, and above all not an exception
+
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setenv(progress.VARIABLE, str(events_file))
+    progress.report(3, 4, "mesh")
+
+    assert json.loads(events_file.read_text()) == {
+        "fraction": 0.5, "message": "mesh 3 of 4",
+    }
+
+
+def test_the_engine_reports_the_position_it_already_logs():
+    """The counter was there and went only to the server's log. The rule the
+    log line states -- position in the batch, never the mesh's name -- is why
+    the progress call could take it unchanged."""
+    source = open(engine.__file__, encoding="utf-8").read()
+    assert 'progress.report(mesh_index, len(meshes), "mesh")' in source

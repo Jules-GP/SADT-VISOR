@@ -49,21 +49,20 @@ def run(
         automation: Semi-Automated takes meshes that already carry their tooth
             labels and orientation; Fully-Automated labels and orients them
             first, through the crown-segmentation and orientation tools.
-        reference: Fully-Automated only. The orientation reference.
+        reference: The frame the arches are oriented onto before registering.
         patch: Which part of the arch to match on -- the palate for an upper
             arch, the band around the mucogingival line for a lower one.
         registration_model: The model that finds the palatal patch. Not used by
             the mucogingival patch, which is built from landmarks and involves
             no network at all.
-        crown_model: Fully-Automated only. The checkpoint the crown-labelling
-            tool runs with. A mesh that already carries its tooth-label array
-            needs none.
-        mgl_model: Mucogingival patch only. The landmark bundle the line is
-            predicted from, when no landmarks are sent.
-        mgl_landmarks: Mucogingival patch only. Your own 13 landmarks per lower
-            scan, instead of having them predicted.
-        mgl_patch_height: Mucogingival patch only. How far the band extends
-            from the line, in millimetres. 0 uses the engine's default.
+        crown_model: The checkpoint the crown-labelling tool runs with. A mesh
+            that already carries its tooth-label array needs none.
+        mgl_model: The landmark bundle the mucogingival line is predicted
+            from, when no landmarks are sent.
+        mgl_landmarks: Your own 13 landmarks per lower scan, marking the
+            mucogingival line, instead of having them predicted.
+        mgl_patch_height: How far the band extends from the mucogingival
+            line, in millimetres. 0 uses the engine's default.
         output_suffix: Added to each output name, e.g. `scan_Reg.vtk`.
 
     Returns:
