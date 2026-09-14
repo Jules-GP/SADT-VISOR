@@ -22,7 +22,11 @@ import pytest
 import SimpleITK as sitk
 from sadt_testkit import ToolFailed, is_built, run_tool, tool_schema
 
-TOOL = "ALI"
+# The engine, not the facade: `tools/ALI` is a folder holding two of them and
+# has no venv of its own. Gated on "ALI", every test here skipped from the day
+# the tool was split -- including the one below that checks the published schema
+# still matches run()'s signature, which is what the server dispatches against.
+TOOL = "ALI_CBCT"
 
 needs_venv = pytest.mark.skipif(
     not is_built(TOOL),
@@ -48,18 +52,29 @@ def test_the_published_schema_matches_the_callable(cohort, tmp_path):
     """The server drives `run()` from this schema, so it has to be true."""
     schema = tool_schema(TOOL)
 
-    assert schema["name"] == "ALI"
+    # Everything below was written before ALI was split into two engines, and
+    # this test could not run from that day until 2026-09-14 -- `is_built("ALI")`
+    # answered False whatever was built, so it skipped instead of failing. What
+    # it asserted had drifted three ways in the meantime, and none of the three
+    # was caught: the tool's NAME, the required set, and the argument names.
+    assert schema["name"] == "ALI_CBCT"
     assert schema["returns"] == "path"
-    required = [name for name, spec in schema["arguments"].items() if spec["required"]]
-    assert required == ["input", "model", "output_dir"]
 
-    # Both selections are optional, because each is inert in the other mode --
-    # a required one would block every run of the mode it does not apply to.
-    for name in ("cbct_regions", "landmarks", "ios_networks"):
+    # `model` is optional now, and deliberately: a neighbour asking through the
+    # supervisor omits it, and this engine resolves its own bundle. Required, a
+    # supervised call died on "run() missing 1 required positional argument".
+    required = [name for name, spec in schema["arguments"].items() if spec["required"]]
+    assert required == ["input", "output_dir"]
+
+    # `regions`, not `cbct_regions`: this engine IS the CBCT one, so the prefix
+    # that told the two apart inside one tool says nothing here. `ios_networks`
+    # belongs to the other engine and is not published by this one at all.
+    for name in ("model", "regions", "landmarks"):
         assert not schema["arguments"][name]["required"]
+    assert "ios_networks" not in schema["arguments"]
 
     # And the options the schema publishes are options the tool really takes.
-    assert "Cranial base" in schema["arguments"]["cbct_regions"]["choices"]
+    assert "Cranial base" in schema["arguments"]["regions"]["choices"]
     assert "Ba" in schema["arguments"]["landmarks"]["choices"]
     assert schema["arguments"]["device"]["choices"] == ["cuda", "cpu"]
 
