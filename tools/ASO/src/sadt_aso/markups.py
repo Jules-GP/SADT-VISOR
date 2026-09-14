@@ -105,6 +105,13 @@ def rewrite_landmarks(landmarks: dict, template_path: str, output_path: str) -> 
         point["position"] = [float(position[0]), float(position[1]), float(position[2])]
         kept.append(point)
     document["markups"][0]["controlPoints"] = kept
+    # Everything else the caller had is theirs and is kept -- colours, glyph
+    # sizes, fields this tool has never heard of. This ONE field is not a
+    # preference: `false` switches the display node off, so Slicer builds the
+    # node and draws nothing. A caller handing us a file written by an older
+    # version of this tool would get an invisible result back and no way to
+    # tell it from a run that placed nothing.
+    document["markups"][0].setdefault("display", {})["visibility"] = True
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w") as handle:
@@ -134,7 +141,18 @@ def _control_points(landmarks: dict) -> list:
 
 def _display_settings() -> dict:
     return {
-        "visibility": False,
+        # TRUE, and this is the one value in this block that is not cosmetic.
+        # It is the markups DISPLAY node, not a control point: `false` here
+        # switches the whole node off, so Slicer loads the file, builds the
+        # node, lists it in the Markups module -- and draws nothing. The per
+        # point `visibility` above cannot rescue it; a visible point in a node
+        # that is not displayed is still invisible.
+        #
+        # Both original CLIs wrote `false`, and inside the old Slicer module it
+        # went unnoticed: the module loaded the nodes itself and its panel could
+        # switch them back on. Opening a returned archive -- which is what a
+        # server result IS -- showed an empty scene with no error to explain it.
+        "visibility": True,
         "opacity": 1.0,
         "color": [0.5, 0.5, 0.5],
         "selectedColor": [0.2666666666666667, 0.6745098039215687, 0.39215686274509806],
