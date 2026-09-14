@@ -80,6 +80,16 @@ DATA_ROOT = "data_root"
 
 INJECTED = (SUPERVISOR, DATA_ROOT)
 
+# Arguments a tool never declares and the SERVER adds for it. `keep_intermediate`
+# appears on any tool that calls another (see `supervised_calls`): collecting what
+# a chain produced is the same operation every time, so it is done once in the
+# runner rather than written into each orchestrating tool.
+#
+# A layout may still name one. That is the whole point of publishing it here: the
+# argument is generic, but "Keep the predicted landmarks" and "Keep the labelled
+# meshes" are not, and only the tool knows which it produces.
+INJECTED_ARGUMENTS = ("keep_intermediate",)
+
 # The docstring section that explains the arguments, in the Google style the
 # whole repository already writes. It is the ONLY place that text lives: the
 # client shows it under the field, and a panel without it is a column of
@@ -113,6 +123,11 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # ranges: "0.8" says nothing about where that is in a mouth, and
                # "mid"/"out" does.
                "x_labels", "y_labels",
+               # MULTICHOICE only: a "select all" / "select none" pair above
+               # the options, for a catalogue nobody would tick one box at a
+               # time. The client hides the pair when there is only one option,
+               # where it would be two buttons for one check box.
+               "select_all",
                # How many columns this argument's SECTION is laid out in.
                # Declared per argument because that is where a layout hangs its
                # hints; the client reads it back per section.
@@ -573,10 +588,12 @@ def layout_for(package, arguments):
 
     for name, hints in declared.items():
         where = "layout for '{}'".format(name)
-        if name not in arguments:
+        if name not in arguments and name not in INJECTED_ARGUMENTS:
             raise SchemaError(
                 "{}: run() has no argument '{}'. A layout may only describe "
-                "arguments that exist.".format(where, name)
+                "arguments that exist, or one of the injected {}.".format(
+                    where, name, ", ".join(INJECTED_ARGUMENTS)
+                )
             )
         if not isinstance(hints, dict):
             raise SchemaError("{}: must be a dict of hints.".format(where))
@@ -587,7 +604,8 @@ def layout_for(package, arguments):
                     where, ", ".join(unknown), ", ".join(LAYOUT_KEYS)
                 )
             )
-        _check_groups(where, hints, arguments[name])
+        if name in arguments:
+            _check_groups(where, hints, arguments[name])
         _check_visible_when(where, hints, arguments)
     return declared
 
@@ -704,8 +722,16 @@ def describe_run(run, package=None):
     # second place to look is a second place to forget.
     for name, text in argument_docs(doc, arguments).items():
         arguments[name]["description"] = text
-    for name, hints in layout_for(package, arguments).items() if package else []:
-        arguments[name].update(hints)
+    injected_layout = {}
+    for name, hints in (layout_for(package, arguments).items() if package else []):
+        if name in arguments:
+            arguments[name].update(hints)
+        else:
+            # An argument this tool does not declare: the server adds it, so its
+            # presentation travels beside the arguments rather than inside them.
+            injected_layout[name] = hints
+    if injected_layout:
+        described["injected_layout"] = injected_layout
 
     if supervisor:
         # Published so the server can tell, before accepting a job, that this
