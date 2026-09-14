@@ -6,6 +6,7 @@ contributor working on one tool has no reason to have built the others.
 """
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -243,3 +244,81 @@ def test_the_tool_runs_under_its_own_interpreter_not_the_callers(tmp_path):
     # tool's own parser, i.e. the re-exec happened.
     assert completed.returncode != 0
     assert "run_tool.py _template" in completed.stderr
+
+
+# ---------------------------------------------------------------------------
+# Progress -- the channel the server uses, exercised from a checkout
+# ---------------------------------------------------------------------------
+
+def test_progress_is_a_no_op_when_no_one_asked_for_it(monkeypatch):
+    monkeypatch.delenv(run_tool.PROGRESS_VARIABLE, raising=False)
+
+    assert run_tool.append_progress(0.5, "anything") is False
+
+
+def test_an_event_is_one_json_line(tmp_path, monkeypatch):
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setenv(run_tool.PROGRESS_VARIABLE, str(events))
+
+    assert run_tool.append_progress(0.25, "scan 1 of 4") is True
+    assert json.loads(events.read_text()) == {"fraction": 0.25, "message": "scan 1 of 4"}
+
+
+def test_a_failure_to_report_is_swallowed(tmp_path, monkeypatch):
+    """Telemetry must never be the reason a run fails."""
+    monkeypatch.setenv(run_tool.PROGRESS_VARIABLE, str(tmp_path / "no" / "such" / "dir"))
+
+    assert run_tool.append_progress(0.5, "into a directory that is not there") is False
+
+
+def test_the_supervisor_reports_on_the_same_file_a_tool_does(tmp_path, monkeypatch):
+    """`sup.progress` is one of the supervisor's five members and four tools
+    already call it. It has to land where a tool's own `progress.py` lands, or
+    a chain would report half of itself on one channel and half on the other."""
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setenv(run_tool.PROGRESS_VARIABLE, str(events))
+    sup = run_tool.LocalSupervisor(out=tmp_path / "out", tmp=tmp_path)
+
+    sup.progress(0.2, "predicting landmarks with ALI_CBCT")
+
+    assert json.loads(events.read_text()) == {
+        "fraction": 0.2, "message": "predicting landmarks with ALI_CBCT",
+    }
+
+
+def test_a_nested_run_inherits_the_file_rather_than_making_its_own(tmp_path, monkeypatch):
+    """A supervised child re-enters this script with the parent's file in its
+    environment -- which is the whole implementation of chain progress. A second
+    echo would print every event once per level of the chain."""
+    monkeypatch.setenv(run_tool.PROGRESS_VARIABLE, str(tmp_path / "parent.jsonl"))
+
+    stop = run_tool.watch_progress()
+
+    assert os.environ[run_tool.PROGRESS_VARIABLE] == str(tmp_path / "parent.jsonl")
+    stop()
+
+
+@needs_template
+def test_a_developer_sees_what_the_server_would(tmp_path):
+    """Set by run_tool.py itself, so a tool's progress reporting is exercised
+    from a checkout instead of being discovered to be silent once deployed."""
+    import numpy as np
+
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    for name in ("a", "b", "c"):
+        np.save(scans / f"{name}.npy", np.arange(10, dtype=np.float32))
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPTS / "run_tool.py"), "_template",
+         "--scans", str(scans), "--output-dir", str(tmp_path / "out")],
+        capture_output=True, text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    reported = [line for line in completed.stderr.splitlines() if "[progress]" in line]
+    assert reported == [
+        "[progress]  0% scan 1 of 3",
+        "[progress] 33% scan 2 of 3",
+        "[progress] 67% scan 3 of 3",
+    ]
