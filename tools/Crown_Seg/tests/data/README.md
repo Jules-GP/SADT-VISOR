@@ -24,17 +24,21 @@ Note that the published test mesh is **already segmented** -- it carries a
 `skip_segmented=False` to force the network to run on it anyway, which is what
 the real-model test does.
 
-## Running the real-model test
+## Running the real-data tests
 
-`test_real_model_labels_a_real_mesh` is marked `gpu` and `models`, and needs
-the engine, which a plain `uv sync` does not install:
+`tests/test_real_data.py` holds four of them. All are marked `models`, two also
+`gpu`, and both markers are **deselected by default** -- `-o addopts=` is what
+turns the default selection off so `-m models` can select them:
 
 ```bash
-uv sync --extra segmentation     # builds pytorch3d from source, see README.md
+uv sync --extra segmentation     # a prebuilt pytorch3d wheel, see README.md
 SADT_CROWNSEG_MODEL=/path/to/DATA/CrownSeg/models/07-21-22_val-loss0.169.pth \
 SADT_CROWNSEG_MESH=/path/to/DATA/CrownSeg/testfiles/T1_01_U_segmented.vtk \
-uv run pytest -m models
+uv run pytest -m models -o addopts=
 ```
+
+Two of the four need no card: they pin the published mesh's 294 260 points and
+run the already-segmented bypass on it. The other two run the network.
 
 Write manual runs into the repository's gitignored `output/` directory, never
 next to the inputs.

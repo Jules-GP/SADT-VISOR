@@ -50,7 +50,9 @@ def run(
             patient, instead of matching it to a patient by name. What a mirror
             matrix needs, and meaningless with more than one transform.
         name_output_after_transform: Add the transform's name to each output,
-            which is what tells two transforms of one patient apart.
+            which is what tells two transforms of one patient apart. A patient
+            who has several gets it whatever this says, since otherwise each
+            output overwrites the last.
         output_suffix: Appended to each output name.
         content: How the voxels are resampled. "Segmentation" uses nearest
             neighbour, so no label is invented; "Scan" interpolates linearly;
@@ -126,7 +128,13 @@ def run(
                 try:
                     written.append(_apply_one(
                         path, matrix, files, output_dir, reference_image,
-                        content, name_output_after_transform,
+                        content,
+                        # Several transforms of one patient force the transform
+                        # name on whatever the caller asked for: with the flag
+                        # off every one of them resolved to the SAME output
+                        # name, so each overwrote the last while the report
+                        # counted them all as written.
+                        name_output_after_transform or len(matrices) > 1,
                         output_suffix, entry,
                     ))
                 except Exception as exc:
@@ -286,6 +294,11 @@ def _discover_transforms(root: str) -> dict:
     return _walk(root, is_transform_file)
 
 
+def _with_tail(stem: str, tail: str) -> str:
+    """`stem_tail`, or `stem` when there is no tail to add."""
+    return f"{stem}_{tail}" if tail else stem
+
+
 def _apply_one(path, matrix, input_root, output_dir, reference, content,
                name_after_transform, suffix, entry) -> str:
     """One file through one transform. Returns the path written."""
@@ -294,9 +307,14 @@ def _apply_one(path, matrix, input_root, output_dir, reference, content,
     transform = read_transform(matrix)
     name = os.path.basename(path)
 
-    tail = suffix
-    if name_after_transform:
-        tail = f"{suffix}_{Path(matrix).stem}"
+    # Joined from the parts that exist, so an empty `output_suffix` gives
+    # `P1_T1.nii.gz` rather than `P1_T1_.nii.gz` -- and, with the transform
+    # named too, `P1_T1__P1_CBReg.nii.gz`.
+    tail = "_".join(
+        part
+        for part in (suffix, Path(matrix).stem if name_after_transform else "")
+        if part
+    )
 
     relative = os.path.relpath(path, str(input_root)) if os.path.isdir(str(input_root)) else name
     destination = output_dir / relative
@@ -304,7 +322,7 @@ def _apply_one(path, matrix, input_root, output_dir, reference, content,
 
     if is_landmark_file(name):
         stem = name[: -len(".mrk.json")]
-        destination = destination.parent / f"{stem}_{tail}.mrk.json"
+        destination = destination.parent / f"{_with_tail(stem, tail)}.mrk.json"
         moved = apply_to_landmarks(path, transform, str(destination))
         entry["outputs"].append({"file": destination.name, "points_moved": moved})
         return str(destination)
@@ -316,7 +334,7 @@ def _apply_one(path, matrix, input_root, output_dir, reference, content,
     else:
         stem, tail_extension = os.path.splitext(name)
 
-    destination = destination.parent / f"{stem}_{tail}{tail_extension}"
+    destination = destination.parent / f"{_with_tail(stem, tail)}{tail_extension}"
     image = sitk.ReadImage(path)
 
     # A caller that named the content is believed; "Automatic" is read off the

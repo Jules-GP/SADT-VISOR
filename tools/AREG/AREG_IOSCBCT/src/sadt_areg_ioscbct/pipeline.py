@@ -27,7 +27,7 @@ SURFACE_EXTENSIONS = (".vtk", ".stl")
 LANDMARK_EXTENSIONS = (".json", ".mrk.json")
 
 
-def _patient_key(filename: str) -> str:
+def patient_key(filename: str) -> str:
     """`P001_T2_U.vtk` and `P_0001_T2.nii.gz` are the same patient.
 
     The two modalities are named by different conventions -- the intraoral files
@@ -38,9 +38,13 @@ def _patient_key(filename: str) -> str:
     Deliberately cruder than `pairing.patient_stem`, and only used here: that
     function matches two files that came from the SAME source and can rely on a
     shared stem. Across modalities there is no shared stem to rely on.
+
+    Public because `dispatch` keys landmark files by it too: a landmark file
+    belongs to the patient its name names, and matching one to a mesh by the
+    jaw token alone is how a two-patient batch registered one patient against
+    another's points.
     """
     stem = pairing.split_scan_extension(os.path.basename(filename))[0]
-    digits = "".join(character for character in stem if character.isdigit())
     # The trailing timepoint digit is part of the name, not the patient: strip
     # the tokens that name one before reducing to digits.
     tokens = [t for t in pairing.tokens(stem) if t not in ("t0", "t1", "t2")]
@@ -48,24 +52,33 @@ def _patient_key(filename: str) -> str:
     return digits.lstrip("0") or digits or stem
 
 
-def discover(ios_dir: str, cbct_dir: str) -> dict:
-    """`{patient: {"ios": [paths], "cbct": path}}`, for what is present in both.
+def discover(ios_dir: str, cbct_dir: str) -> tuple:
+    """`({patient: {"ios": [paths], "cbct": path}}, {patient: why})`.
 
     A patient with only one modality is reported rather than silently dropped:
     a batch that registered half of what was sent and said nothing is the
     failure this repository keeps finding.
+
+    Both walks are ordered -- the subdirectories sorted in place, the files
+    sorted -- and a patient with several CBCTs keeps the FIRST, the same rule
+    `pairing.discover` uses for the longitudinal engines. It used to keep
+    whichever `os.walk` happened to reach last, so which volume a patient was
+    registered onto depended on the order the filesystem returned directories
+    in: the same request could give two different answers on two machines.
     """
     ios: dict = {}
-    for root, _dirs, files in os.walk(ios_dir):
+    for root, directories, files in os.walk(ios_dir):
+        directories.sort()
         for name in sorted(files):
             if name.lower().endswith(SURFACE_EXTENSIONS):
-                ios.setdefault(_patient_key(name), []).append(os.path.join(root, name))
+                ios.setdefault(patient_key(name), []).append(os.path.join(root, name))
 
     cbct: dict = {}
-    for root, _dirs, files in os.walk(cbct_dir):
+    for root, directories, files in os.walk(cbct_dir):
+        directories.sort()
         for name in sorted(files):
             if pairing.is_scan_file(name):
-                cbct[_patient_key(name)] = os.path.join(root, name)
+                cbct.setdefault(patient_key(name), os.path.join(root, name))
 
     paired, unpaired = {}, {}
     for key in sorted(set(ios) | set(cbct)):
@@ -151,7 +164,7 @@ def register_one(mesh_points: np.ndarray, ios_landmarks: dict, cbct_landmarks: d
     sampled from the CBCT rather than the volume itself.
     """
     moving, fixed, used, dropped = shared_landmarks(ios_landmarks, cbct_landmarks)
-    matrix = geometry.align_by_landmarks(mesh_points, moving, fixed)
+    matrix = geometry.align_by_landmarks(moving, fixed)
     report = {"landmarks_used": used, "landmarks_dropped": dropped, "icp": None}
 
     if cbct_points is not None and len(cbct_points) >= 3:

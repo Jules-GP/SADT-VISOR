@@ -214,6 +214,64 @@ def load_reference(reference_dir: str, need_surfaces=None) -> dict:
     return merged
 
 
+class FileCache:
+    """The meshes and landmark files a run reads more than once, read once.
+
+    Nothing about the pairing or the registration changed; what changed is how
+    often the same bytes are parsed. A fully-automated jaw read THREE meshes to
+    orient one: the patient's, the reference's, and then the patient's again in
+    `_write_jaw`, which needed the untransformed mesh to apply the matrix to.
+    A semi-automated jaw parsed its landmark file twice for the same reason.
+    And the reference -- one file for the whole cohort -- was re-read once per
+    jaw per patient, so a forty-patient batch parsed the gold meshes eighty
+    times.
+
+    **This can only be a speedup, never a change**, because every reader here
+    treats a mesh as immutable: `surfaces.transform_surface` deep-copies before
+    it transforms, `labels_of`, `points_of`, `label_array_name` and
+    `write_surface` only read, and the landmark dicts are handed out as fresh
+    dicts over shared coordinate arrays that nothing writes into.
+    `test_the_cache_hands_back_an_unmodified_mesh` holds that.
+
+    Two lifetimes, because holding everything would trade a second for a
+    gigabyte: `keep=True` is for the reference, which is the same file for
+    every patient, and everything else is dropped by `release()` when the
+    patient it belongs to is done. Forty intra-oral scans at ~10 MB of parsed
+    geometry each is not memory a shared server should spend on files nobody
+    will look at again.
+    """
+
+    def __init__(self):
+        self._kept: dict = {}
+        self._patient: dict = {}
+
+    def surface(self, path: str, keep: bool = False):
+        return self._get(surfaces.read_surface, path, keep)
+
+    def landmarks(self, path: str, keep: bool = False) -> dict:
+        # A fresh dict over the same arrays: a caller may filter or extend what
+        # it was handed, and must not be able to edit the cache by doing so.
+        return dict(self._get(markups.load_landmarks, path, keep))
+
+    def release(self) -> None:
+        """Forget everything belonging to the patient just finished."""
+        self._patient.clear()
+
+    def _get(self, read, path: str, keep: bool):
+        store = self._kept if keep else self._patient
+        key = (read.__name__, path)
+        value = store.get(key)
+        if value is None:
+            # The other store may already hold it: a caller can legitimately
+            # ask for the same file both ways (a reference bundle used as the
+            # input, which re-running on an output folder does).
+            value = self._kept.get(key) or self._patient.get(key)
+        if value is None:
+            value = read(path)
+            store[key] = value
+        return value
+
+
 def orient_patient(
     jaws: dict,
     reference: dict,
@@ -227,52 +285,67 @@ def orient_patient(
     suffix: str,
     max_triplets: int,
     seed: int,
+    cache: "FileCache" = None,
 ) -> dict:
     """Orient one patient's jaws. Returns a report entry.
 
     With `driving_jaw` set, that jaw's transform is applied to the other one as
     well -- occlusion is preserved by moving both halves rigidly together, which
     only makes sense if the two meshes were in occlusion to begin with.
+
+    `cache` is shared across the cohort so the reference bundle is parsed once
+    rather than once per patient; without one, each call gets a fresh cache and
+    still avoids re-reading a patient's own mesh.
     """
     entry: dict = {"status": "ok", "jaws": {}, "outputs": []}
     matrices: dict = {}
+    cache = cache if cache is not None else FileCache()
 
-    order = _ordered_jaws(wanted_jaws, driving_jaw)
-    for jaw in order:
-        available = jaws.get(jaw)
-        if not available or not available["surface"]:
-            entry["jaws"][jaw] = {"status": "skipped", "reason": "no mesh for this jaw"}
-            continue
-        try:
-            matrices[jaw] = _matrix_for(
-                jaw,
-                available,
-                reference,
-                automation,
-                selected_teeth,
-                landmark_keys,
-                driving_jaw,
-                matrices,
-                max_triplets,
-                seed,
+    try:
+        order = _ordered_jaws(wanted_jaws, driving_jaw)
+        for jaw in order:
+            available = jaws.get(jaw)
+            if not available or not available["surface"]:
+                entry["jaws"][jaw] = {
+                    "status": "skipped",
+                    "reason": "no mesh for this jaw",
+                }
+                continue
+            try:
+                matrices[jaw] = _matrix_for(
+                    jaw,
+                    available,
+                    reference,
+                    automation,
+                    selected_teeth,
+                    landmark_keys,
+                    driving_jaw,
+                    matrices,
+                    max_triplets,
+                    seed,
+                    cache,
+                )
+            except (ios_icp.RegistrationError, surfaces.SurfaceError, ValueError) as exc:
+                entry["jaws"][jaw] = {"status": "failed", "reason": str(exc)}
+                continue
+
+            written = _write_jaw(
+                available, matrices[jaw], output_dir, relative_key, jaw, suffix, cache
             )
-        except (ios_icp.RegistrationError, surfaces.SurfaceError, ValueError) as exc:
-            entry["jaws"][jaw] = {"status": "failed", "reason": str(exc)}
-            continue
-
-        written = _write_jaw(
-            available, matrices[jaw], output_dir, relative_key, jaw, suffix
-        )
-        entry["jaws"][jaw] = {
-            "status": "ok",
-            "registered_on": (
-                f"the {driving_jaw} jaw's transform"
-                if driving_jaw and jaw != driving_jaw
-                else ("tooth centroids" if automation == catalogs.AUTOMATION_FULLY
-                      else "landmarks")
-            ),
-        }
-        entry["outputs"].extend(written)
+            entry["jaws"][jaw] = {
+                "status": "ok",
+                "registered_on": (
+                    f"the {driving_jaw} jaw's transform"
+                    if driving_jaw and jaw != driving_jaw
+                    else ("tooth centroids" if automation == catalogs.AUTOMATION_FULLY
+                          else "landmarks")
+                ),
+            }
+            entry["outputs"].extend(written)
+    finally:
+        # This patient's meshes are of no further use, and the next one's are
+        # the same size. Released even when a jaw raised something unexpected.
+        cache.release()
 
     if not any(jaw.get("status") == "ok" for jaw in entry["jaws"].values()):
         entry["status"] = "failed"
@@ -325,6 +398,7 @@ def _matrix_for(
     matrices: dict,
     max_triplets: int,
     seed: int,
+    cache: FileCache,
 ) -> np.ndarray:
     if driving_jaw and jaw != driving_jaw:
         if driving_jaw not in matrices:
@@ -351,25 +425,30 @@ def _matrix_for(
     forced = automation == catalogs.AUTOMATION_FULLY
     if forced or not available["markups"]:
         return _fully_automated_matrix(
-            available, reference_entry, selected_teeth[jaw], max_triplets, seed
+            available, reference_entry, selected_teeth[jaw], max_triplets, seed, cache
         )
     return _semi_automated_matrix(
-        available, reference_entry, landmark_keys[jaw], max_triplets, seed
+        available, reference_entry, landmark_keys[jaw], max_triplets, seed, cache
     )
 
 
 def _fully_automated_matrix(
-    available: dict, reference_entry: dict, teeth: list, max_triplets: int, seed: int
+    available: dict,
+    reference_entry: dict,
+    teeth: list,
+    max_triplets: int,
+    seed: int,
+    cache: FileCache,
 ) -> np.ndarray:
     if not reference_entry["surface"]:
         raise ios_icp.RegistrationError("the reference has no mesh for this jaw")
 
-    source = surfaces.read_surface(available["surface"])
+    source = cache.surface(available["surface"])
     array_name = surfaces.label_array_name(source)
     if array_name is None:
         segment_unlabelled(available["surface"])
 
-    target = surfaces.read_surface(reference_entry["surface"])
+    target = cache.surface(reference_entry["surface"], keep=True)
     reference_array = surfaces.label_array_name(target)
     if reference_array is None:
         raise ios_icp.RegistrationError(
@@ -391,7 +470,12 @@ def _fully_automated_matrix(
 
 
 def _semi_automated_matrix(
-    available: dict, reference_entry: dict, keys: list, max_triplets: int, seed: int
+    available: dict,
+    reference_entry: dict,
+    keys: list,
+    max_triplets: int,
+    seed: int,
+    cache: FileCache,
 ) -> np.ndarray:
     if not available["markups"]:
         raise ios_icp.RegistrationError(
@@ -401,8 +485,10 @@ def _semi_automated_matrix(
     if not reference_entry["markups"]:
         raise ios_icp.RegistrationError("the reference has no landmark file for this jaw")
 
-    source = ios_icp.select_keys(markups.load_landmarks(available["markups"]), keys)
-    target = ios_icp.select_keys(markups.load_landmarks(reference_entry["markups"]), keys)
+    source = ios_icp.select_keys(cache.landmarks(available["markups"]), keys)
+    target = ios_icp.select_keys(
+        cache.landmarks(reference_entry["markups"], keep=True), keys
+    )
     return ios_icp.register(source, target, max_triplets=max_triplets, seed=seed)
 
 
@@ -413,13 +499,14 @@ def _write_jaw(
     relative_key: str,
     jaw: str,
     suffix: str,
+    cache: FileCache,
 ) -> list:
     relative_dir, patient = os.path.split(relative_key)
     destination = os.path.join(output_dir, relative_dir)
     os.makedirs(destination, exist_ok=True)
     written = []
 
-    surface = surfaces.read_surface(available["surface"])
+    surface = cache.surface(available["surface"])
     oriented = surfaces.transform_surface(surface, matrix)
     stem = _strip_extension(os.path.basename(available["surface"]))
     extension = surfaces.output_extension(available["surface"])
@@ -428,7 +515,7 @@ def _write_jaw(
     )
 
     if available["markups"]:
-        landmarks = markups.load_landmarks(available["markups"])
+        landmarks = cache.landmarks(available["markups"])
         moved = {
             name: (matrix @ np.append(point, 1.0))[:3] for name, point in landmarks.items()
         }

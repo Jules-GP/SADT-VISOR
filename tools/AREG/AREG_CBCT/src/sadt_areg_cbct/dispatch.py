@@ -72,7 +72,7 @@ class RegistrationRun:
 
 
 def _check_cbct(automation: str, regions: list, t1_masks, reference,
-                segmentation_model=None, sup=None) -> None:
+                segmentation_model=None, sup=None, landmark_model=None) -> None:
     if not regions:
         raise ToolInputError(
             "Select at least one anatomical region to register on in 'cbct_regions' "
@@ -100,6 +100,16 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference,
                 "Oriented + Fully-Automated CBCT orients the T1 scans before "
                 "registering onto them, which needs an orientation reference: name "
                 "one in 'cbct_reference' (see GET /tools/AREG_CBCT/data)."
+            )
+        if not landmark_model:
+            # ASO's own Fully-Automated CBCT mode refuses without it, so the run
+            # dies anyway -- but only after this tool has converted two cohorts
+            # of DICOM and started a second interpreter. `tools.orient_scans`
+            # said this was "required by _check_cbct" before it was.
+            raise ToolInputError(
+                "Oriented + Fully-Automated CBCT orients the T1 scans by predicting "
+                "landmarks on them, which needs the landmark weights: name a bundle "
+                "in 'landmark_model' (see GET /tools/AREG_CBCT/data)."
             )
 
     if not segmentation_model:
@@ -240,28 +250,28 @@ def _selected(value, choices: dict) -> list:
 
     Accepts the `Selection` validate() produces, a plain dict, or a sequence --
     so `register()` stays directly callable with `["Mandible"]`.
+
+    An option nobody offers is REFUSED, not dropped. `Literal` is published,
+    not enforced -- the runner calls `run(**params)` from a JSON object -- so a
+    stale client naming a region that no longer exists used to be handed a
+    narrower registration than it asked for, with nothing in the report saying
+    which of its regions had gone missing. In the dict form only an ENABLED
+    unknown counts, because a client sending back the whole `{option: checked}`
+    dict it was given is not asking for the boxes it left unticked.
     """
     if value is None:
         return [name for name, on in choices.items() if on]
     if isinstance(value, dict):
-        return [name for name in choices if value.get(name)]
-    wanted = set(value)
+        wanted = {name for name, on in value.items() if on}
+    else:
+        wanted = set(value)
+    unknown = sorted(wanted - set(choices))
+    if unknown:
+        raise ToolInputError(
+            f"{', '.join(repr(name) for name in unknown)} is not something this tool "
+            f"can register on. It offers: {', '.join(choices)}."
+        )
     return [name for name in choices if name in wanted]
-
-
-def _merge_into(source: str, destination: str) -> None:
-    """Copy every file of `source` under `destination`, keeping its tree.
-
-    The two timepoints' landmarks end up in ONE folder on purpose: they are
-    matched to their scan by a key that carries the timepoint, so they cannot
-    collide, and one folder is one index for the painter to search.
-    """
-    for directory, _, file_names in os.walk(source):
-        relative = os.path.relpath(directory, source)
-        target = os.path.join(destination, "" if relative == "." else relative)
-        os.makedirs(target, exist_ok=True)
-        for file_name in file_names:
-            shutil.copy2(os.path.join(directory, file_name), os.path.join(target, file_name))
 
 
 def _as_directory(path: str, destination: str) -> str:
@@ -402,7 +412,10 @@ def main(
 
     regions = _selected(cbct_regions, catalogs.REGION_CHOICES)
     reference = cbct_reference
-    _check_cbct(automation, regions, t1_masks, reference, segmentation_model, sup)
+    _check_cbct(
+        automation, regions, t1_masks, reference, segmentation_model, sup,
+        landmark_model,
+    )
 
     run = register(
         t1_path=str(t1),

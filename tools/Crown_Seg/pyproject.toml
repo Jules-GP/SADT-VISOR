@@ -100,7 +100,12 @@ pytorch3d = { index = "pytorch3d-wheels" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Deselected by DEFAULT, not merely skipped: a plain `pytest` must not depend on
+# a card, on the `segmentation` extra, or on a 16 MB mesh being staged -- and a
+# suite whose green line is half skips says nothing. Run them by hand with
+# `-m models -o addopts=` and report the result in the PR.
+addopts = "-m 'not gpu and not models'"
 markers = [
-    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
-    "models: needs the real checkpoint and the `segmentation` extra. See tests/data/README.md.",
+    "gpu: needs a CUDA device. Deselected by default; run it by hand and report the result in the PR.",
+    "models: needs the real checkpoint and mesh, named by SADT_CROWNSEG_MODEL and SADT_CROWNSEG_MESH, and the `segmentation` extra. Deselected by default. See tests/data/README.md.",
 ]

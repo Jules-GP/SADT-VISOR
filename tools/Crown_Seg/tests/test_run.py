@@ -238,7 +238,7 @@ def test_the_input_csv_is_written_under_the_output_dir_and_removed(tmp_path, stu
 def test_the_run_report_lands_beside_the_results(tmp_path, stub_shapeaxi):
     write_surface(tmp_path / "cohort" / "arch.vtk")
 
-    report = pipeline.segment_crowns(
+    returned = pipeline.segment_crowns(
         input_path=str(tmp_path / "cohort"),
         model_path=str(tmp_path / "model.pth"),
         output_dir=str(tmp_path / "out")
@@ -248,6 +248,7 @@ def test_the_run_report_lands_beside_the_results(tmp_path, stub_shapeaxi):
     )
     assert written["numbering"] == "Universal"
     assert written["array_name"] == pipeline.DEFAULT_ARRAY_NAME
+    assert written == returned
 
 
 def test_fdi_numbering_is_passed_through(tmp_path, stub_shapeaxi):

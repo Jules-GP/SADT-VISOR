@@ -83,7 +83,12 @@ pytorch3d = { index = "pytorch3d-wheels" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# DESELECTED, not skipped: a skip is a line of output somebody has to read and
+# decide about on every run, and neither of these can pass without hardware or
+# weights nobody is expected to have. Ask for them by name -- `pytest -m gpu`,
+# `pytest -m models` -- which overrides this.
+addopts = "-m 'not gpu and not models'"
 markers = [
-    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "gpu: needs a CUDA device. Deselected by default; run it by hand and report the result in the PR.",
     "models: needs the real IOS model bundle. See tests/data/README.md.",
 ]

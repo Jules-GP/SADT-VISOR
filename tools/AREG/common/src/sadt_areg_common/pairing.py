@@ -18,6 +18,13 @@ Three defects of those copies are fixed by construction:
   every file whose name contains CBCT a cranial-base mask, `"max"` matches a
   patient named MAX_01 and `"md"` matches almost anything. Matching is on whole
   tokens of the stem.
+
+A fourth was this module's own, and had the same shape. `PATIENT_SUFFIXES` were
+matched with `stem.find(suffix)` at any index, so `P_Seg1_T1.nii.gz` and
+`P_Seg2_T1.nii.gz` both keyed to `P` -- two subjects collapsed into one, one of
+them silently lost or given the other's transform -- and any identifier merely
+CONTAINING a suffix was truncated at it (`SMITH_ORTHO` to `SMITH`). A suffix now
+has to end on a token boundary; see `_token_aligned_index`.
 """
 
 import os
@@ -32,6 +39,10 @@ SCAN_EXTENSIONS = (".nii.gz", ".nrrd.gz", ".gipl.gz", ".nii", ".nrrd", ".gipl")
 _COMPRESSED_EXTENSIONS = {".nii": ".nii.gz", ".gipl": ".gipl.gz", ".nrrd.gz": ".nrrd"}
 
 _SEPARATORS = re.compile(r"([_\-.\s]+)")
+# One separator character, for testing whether an index falls on a token
+# boundary. `_SEPARATORS` matches a whole run and is what SPLITS a stem;
+# this is what asks "is the character on this side of a match a separator".
+_SEPARATOR = re.compile(r"[_\-.\s]")
 
 
 def split_scan_extension(filename: str) -> tuple:
@@ -126,6 +137,40 @@ def _drop_tokens(stem: str, unwanted) -> str:
     return re.sub(r"[_\-.\s]+", "_", "".join(kept)).strip("_-. ")
 
 
+def _token_aligned_index(stem: str, suffix: str) -> int:
+    """Where `suffix` occurs in `stem` as WHOLE tokens, or -1.
+
+    `str.find` alone was the defect this exists to remove. Every entry of
+    `catalogs.PATIENT_SUFFIXES` opens on an underscore, so a raw `find` is
+    already anchored on its left -- and anchored nowhere on its right, which is
+    what let `_Seg` match inside `_Seg1` and `_scan` inside `_scanned`:
+
+    * `P_Seg1_T1.nii.gz` and `P_Seg2_T1.nii.gz` both truncated to `P`, so two
+      subjects became one patient and one of them was silently dropped, or
+      given the other's transform;
+    * any identifier merely CONTAINING a suffix was cut at it -- `SMITH_ORTHO`
+      to `SMITH`, `A_Segmentation` to `A`, `P1_Orion` to `P1`.
+
+    A match therefore has to end on a token boundary: the end of the stem, or a
+    separator. The left side is checked too rather than assumed, so a suffix
+    that does not start with a separator would still be matched as a token
+    rather than as a substring.
+    """
+    start = stem.find(suffix)
+    while start >= 0:
+        end = start + len(suffix)
+        opens_on_a_boundary = (
+            start == 0
+            or bool(_SEPARATOR.match(suffix[0]))
+            or bool(_SEPARATOR.match(stem[start - 1]))
+        )
+        closes_on_a_boundary = end == len(stem) or bool(_SEPARATOR.match(stem[end]))
+        if opens_on_a_boundary and closes_on_a_boundary:
+            return start
+        start = stem.find(suffix, start + 1)
+    return -1
+
+
 def patient_stem(filename: str, also_drop=(), drop_timepoint: bool = True) -> str:
     """The subject a file belongs to, from its name alone.
 
@@ -153,7 +198,9 @@ def patient_stem(filename: str, also_drop=(), drop_timepoint: bool = True) -> st
             stem = stem[: -len(".mrk")]
 
     for suffix in catalogs.PATIENT_SUFFIXES:
-        index = stem.find(suffix)
+        # Truncation, not deletion: everything the suffix introduces goes with
+        # it, so `A1_seg_CBMASK.nii.gz` keys to `A1` and not to `A1_CBMASK`.
+        index = _token_aligned_index(stem, suffix)
         if index > 0:
             stem = stem[:index]
 

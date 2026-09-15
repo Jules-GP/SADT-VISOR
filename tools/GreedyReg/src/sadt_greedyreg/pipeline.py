@@ -15,12 +15,55 @@ import logging
 
 logger = logging.getLogger("GreedyReg")
 
+# The two choices `run()` publishes as `Literal`s, restated here because a
+# `Literal` is PUBLISHED, not enforced: the runner calls `run(**params)` and a
+# direct API call can pass anything. `check_choices` is what refuses it, and it
+# needs the sets written down.
+METRICS = ("NCC", "NMI", "SSD")
+TRANSFORMS = ("Rigid", "Affine")
+
 # Degrees of freedom per transform type, as upstream chose them.
 DEGREES_OF_FREEDOM = {"Rigid": "6", "Affine": "12"}
 
 
+def _check_metric(metric: str) -> None:
+    if metric not in METRICS:
+        raise ValueError(
+            f"Unknown metric {metric!r}. GreedyReg optimises one of: "
+            f"{', '.join(METRICS)}."
+        )
+
+
+def _check_transform(transform_type: str) -> None:
+    if transform_type not in TRANSFORMS:
+        # Named, rather than the bare `KeyError: 'rigid'` the degrees-of-freedom
+        # lookup used to raise: this message is what a 422 carries back.
+        raise ValueError(
+            f"Unknown transform_type {transform_type!r}. GreedyReg registers "
+            f"with one of: {', '.join(TRANSFORMS)}."
+        )
+
+
+def check_choices(metric: str, transform_type: str) -> None:
+    """Refuse an unrecognised metric or transform type, naming the allowed ones.
+
+    Called once before a batch as well as inside the command builders: a typo
+    is one error before anything runs, not the same error reported forty times
+    as forty failed patients.
+    """
+    _check_metric(metric)
+    _check_transform(transform_type)
+
+
 def metric_arguments(metric: str) -> list:
-    """Greedy's `-m` flag. NCC carries a radius, the other two do not."""
+    """Greedy's `-m` flag. NCC carries a radius, the other two do not.
+
+    An unrecognised metric is REFUSED rather than defaulted. The first version
+    fell through to SSD, so `"ncc"` -- the same word in the wrong case, which is
+    what a `sup` call or a direct API call can send -- silently changed what was
+    optimised and the report said NCC anyway.
+    """
+    _check_metric(metric)
     if metric == "NCC":
         return ["-m", "NCC", "4x4x4"]
     if metric == "NMI":
@@ -36,6 +79,7 @@ def registration_command(fixed: str, moving: str, transform_out: str, init: str,
     the random search that precedes it. They are not exposed: they describe how
     this registration was tuned, not a per-request choice.
     """
+    _check_transform(transform_type)
     command = ["-d", "3", "-a"]
     command += metric_arguments(metric)
     command += ["-i", fixed, moving]

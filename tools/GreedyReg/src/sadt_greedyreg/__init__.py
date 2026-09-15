@@ -9,11 +9,12 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from sadt_areg_common import pairing
+from sadt_areg_common import catalogs, pairing
 
 from . import progress
 from .pipeline import (
     binarise_mask,
+    check_choices,
     registration_command,
     resample_command,
     run_greedy,
@@ -23,6 +24,15 @@ from .pipeline import (
 logger = logging.getLogger("GreedyReg")
 
 __all__ = ["run"]
+
+# Every token a mask name may carry on top of the patient's own, so
+# `P1_T1_MAND_seg.nii.gz` keys to the `P1` its scan keys to. The same set
+# `pairing.discover_masks` builds, and applied under the same guard: only to a
+# file that says it IS a mask, so a patient legitimately called `MD_01` is not
+# read as patient `01`.
+_MASK_TOKENS = {
+    token for group in catalogs.REGION_TOKENS.values() for token in group
+} | set(catalogs.MASK_TOKENS)
 
 
 def run(
@@ -76,6 +86,10 @@ def run(
         `<patient>_transform.mat` and `GreedyReg_report.json`.
     """
     started = time.monotonic()
+    # Before a folder is walked or a directory created: a metric this tool does
+    # not have is a bad request, and answering it with forty identical
+    # per-patient failures would hide that.
+    check_choices(metric, transform_type)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,15 +110,29 @@ def run(
     }
 
     if not matched:
+        # The counts alone say the run failed; the NAMES say why, and they are
+        # the half a caller can act on -- almost always one folder using a
+        # decoration the other does not.
         raise ValueError(
             "No patient appears in both the T1 and the T2 folder. They are paired "
             "by name, up to the timepoint token -- so 'P1_T1_scan.nii.gz' pairs "
-            f"with 'P1_T2.nii.gz'. Found {len(matched.t1_only)} T1-only and "
-            f"{len(matched.t2_only)} T2-only patient(s)."
+            f"with 'P1_T2.nii.gz'. Found {len(matched.t1_only)} T1-only "
+            f"({_listed(matched.t1_only)}) and {len(matched.t2_only)} T2-only "
+            f"({_listed(matched.t2_only)}) patient(s)."
         )
 
-    mask_by_patient = pairing.discover(str(masks), output_suffix) if masks else {}
+    mask_by_patient = _discover_masks(str(masks)) if masks else {}
     init_by_patient = _discover_transforms(str(initial_transforms)) if initial_transforms else {}
+
+    # A mask or an initial transform that matched no patient is REPORTED, not
+    # dropped. It is the same silence this port exists to remove: a run that
+    # quietly registered without the mask it was handed looks, from the
+    # outside, exactly like one that used it.
+    report["unused_masks"] = sorted(set(mask_by_patient) - set(matched.matched))
+    report["unused_initial_transforms"] = sorted(set(init_by_patient) - set(matched.matched))
+    for kind in ("unused_masks", "unused_initial_transforms"):
+        if report[kind]:
+            logger.warning("GreedyReg: %d %s matched no patient", len(report[kind]), kind)
 
     registered = 0
     for index, (patient, files) in enumerate(matched.matched.items(), start=1):
@@ -113,8 +141,13 @@ def run(
         progress.report(index, len(matched.matched), "patient")
         fixed, moving = files["t1"], files["t2"]
         entry = {"t1": os.path.basename(fixed), "t2": os.path.basename(moving)}
-        scratch = tempfile.mkdtemp(prefix=f"greedyreg_{patient}_")
+        scratch = None
         try:
+            # Inside the guard, and with the separators of a nested patient key
+            # flattened: `mkdtemp(prefix="greedyreg_sub/A1_")` raises, and it
+            # raised OUTSIDE this try -- so one patient in a subfolder took the
+            # whole batch down, which is the failure this port exists to end.
+            scratch = tempfile.mkdtemp(prefix=f"greedyreg_{patient.replace(os.sep, '_')}_")
             _register_one(
                 patient, fixed, moving, output_dir, scratch,
                 mask_by_patient.get(patient), init_by_patient.get(patient),
@@ -133,7 +166,8 @@ def run(
             entry["status"] = "failed"
             entry["reason"] = f"{type(exc).__name__}: {exc}"
         finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+            if scratch:
+                shutil.rmtree(scratch, ignore_errors=True)
         report["patients"][patient] = entry
 
     report["summary"] = {
@@ -156,16 +190,61 @@ def run(
     return output_dir
 
 
-def _discover_transforms(root: str) -> dict:
-    """`.mat` files, keyed by the same patient rule the scans are."""
-    found = {}
-    if not os.path.isdir(root):
-        return found
+def _listed(keys: list, limit: int = 10) -> str:
+    """The first few patient keys, as a sentence fragment."""
+    if not keys:
+        return "none"
+    shown = ", ".join(keys[:limit])
+    return shown if len(keys) <= limit else f"{shown}, ..."
+
+
+def _relative_prefix(root: str, directory: str) -> str:
+    """The directory part of a patient key, as `pairing.discover` builds it."""
+    relative = os.path.relpath(directory, root)
+    return "" if relative == "." else relative
+
+
+def _discover_masks(root: str) -> dict:
+    """{patient key: mask path}, keyed as the scans are.
+
+    `pairing.discover` was used here at first, and it keys on a bare
+    `patient_stem`: `A1_mask.nii.gz` became patient `A1_mask` and
+    `A1_T1_MAND_seg.nii.gz` became `A1_MAND`, so neither matched the `A1` its
+    scan keys to. Every mask AMASSS writes is named that way, which made the
+    argument inert -- the run went ahead unmasked and said nothing.
+    """
+    found: dict = {}
     for directory, _subdirs, names in os.walk(root):
+        prefix = _relative_prefix(root, directory)
+        for name in sorted(names):
+            if name.startswith(".") or not pairing.is_scan_file(name):
+                continue
+            stem, _extension = pairing.split_scan_extension(name)
+            # Only a file that says it IS a mask is allowed to say which
+            # structure it covers; see _MASK_TOKENS.
+            drop = _MASK_TOKENS if pairing.has_token(stem, catalogs.MASK_TOKENS) else ()
+            key = os.path.join(prefix, pairing.patient_stem(name, also_drop=drop))
+            found.setdefault(key, os.path.join(directory, name))
+    return found
+
+
+def _discover_transforms(root: str) -> dict:
+    """`.mat` files, keyed by the same patient rule the scans are.
+
+    `_transform` is dropped along with the timepoint token, because that is
+    what THIS tool names its own transforms: without it `A1_transform.mat` keyed
+    to patient `A1_transform`, so feeding one run's transforms back in as
+    `initial_transforms` -- the obvious use -- matched nothing and silently
+    restarted every patient from identity.
+    """
+    found: dict = {}
+    for directory, _subdirs, names in os.walk(root):
+        prefix = _relative_prefix(root, directory)
         for name in sorted(names):
             if not name.lower().endswith(".mat") or name.startswith("."):
                 continue
-            found[pairing.patient_stem(name)] = os.path.join(directory, name)
+            key = os.path.join(prefix, pairing.patient_stem(name, also_drop=("transform",)))
+            found.setdefault(key, os.path.join(directory, name))
     return found
 
 
@@ -174,6 +253,10 @@ def _register_one(patient, fixed, moving, output_dir, scratch, mask, init,
     """One pair: affine search, then resample the moving image into the fixed."""
     registered_path = output_dir / f"{patient}_{suffix}.nii.gz"
     transform_path = output_dir / f"{patient}_transform.mat"
+    # A patient key carries the directory it was found in, so the output
+    # mirrors the input tree -- and greedy will not create that directory. It
+    # wrote nothing at all until this line existed.
+    registered_path.parent.mkdir(parents=True, exist_ok=True)
 
     if init:
         entry["initial_transform"] = os.path.basename(init)
@@ -194,4 +277,10 @@ def _register_one(patient, fixed, moving, output_dir, scratch, mask, init,
 
     entry["status"] = "ok"
     entry["transform_maps"] = "the T2 image -> the T1 frame (what greedy -r consumes)"
-    entry["outputs"] = [registered_path.name, transform_path.name]
+    # Relative to the output directory, not just the base name: a nested
+    # patient's two files sit in a subfolder and a caller has to be able to
+    # find them.
+    entry["outputs"] = [
+        str(registered_path.relative_to(output_dir)),
+        str(transform_path.relative_to(output_dir)),
+    ]
