@@ -230,9 +230,14 @@ def test_fully_automated_without_landmarks_is_refused_by_this_runner(case, tmp_p
 # The ALI -> ASO chain, through a real supervisor
 # ---------------------------------------------------------------------------
 
+# The ENGINE, not the facade. `tools/ALI` is a folder holding two engines and
+# has no venv of its own, so `is_built("ALI")` could never be True and the skip
+# reason sent a contributor to run `uv sync` somewhere that cannot be synced.
+_CHAIN_TOOL = "ALI_CBCT"
+
 needs_chain = pytest.mark.skipif(
-    not (is_built(TOOL) and is_built("ALI")),
-    reason="run `uv sync` in tools/ASO and tools/ALI",
+    not (is_built(TOOL) and is_built(_CHAIN_TOOL)),
+    reason=f"run `uv sync` in tools/{TOOL} and tools/ALI/{_CHAIN_TOOL}",
 )
 
 

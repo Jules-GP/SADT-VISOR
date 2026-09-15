@@ -48,6 +48,16 @@ class ToolNotBuilt(Exception):
     """The tool's venv does not exist yet, and says how to make it."""
 
 
+class AmbiguousTool(Exception):
+    """Two tools answer to that name, so which one would run is a guess.
+
+    Deliberately NOT a ToolNotBuilt, which `is_built` catches: an ambiguous name
+    is a mistake in the test, and turning it into "not built" would turn it into
+    a silent skip -- the exact failure this resolver was written to end. It has
+    to reach whoever wrote the name.
+    """
+
+
 class ToolFailed(Exception):
     """The tool ran and raised. Carries what it printed to stderr."""
 
@@ -67,18 +77,75 @@ def repo_root() -> Path:
     )
 
 
+def _tool_folder(name: str) -> Path:
+    """`tools/<name>`, or the one folder of that name a level down.
+
+    Flat was the only layout when this was written, and the lookup said so.
+    Then ALI and AREG were split into engines -- `tools/ALI/ALI_CBCT`,
+    `tools/AREG/AREG_IOSCBCT` -- and a nested tool became unreachable by name:
+    `is_built("ALI_CBCT")` answered False whatever was built, so every test
+    gated on it skipped, quietly and forever.
+
+    That cost something real. `ALI_CBCT`'s whole `test_integration.py` -- five
+    tests, including the one checking that the published schema still matches
+    `run()`'s signature, which is what the server dispatches against -- had not
+    run since the split, and reported itself as "run `uv sync` first": a local
+    setup gap, not a dead path.
+
+    One level only, and exactly one match: the layout is `tools/<facade>/<tool>`
+    and nothing deeper, and two tools sharing a name would make "which one
+    ran" a guess. An explicit `"ALI/ALI_CBCT"` still works -- it is a path and
+    is found by the first branch.
+    """
+    tools = repo_root() / "tools"
+    direct = tools / name
+    if direct.is_dir():
+        return direct
+
+    found = sorted(
+        child / name
+        for child in tools.iterdir()
+        if child.is_dir() and (child / name).is_dir()
+    )
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise AmbiguousTool(
+            "'{}' names {} tools under tools/: {}. Say which one, as "
+            "'<folder>/{}'.".format(
+                name, len(found),
+                ", ".join(str(path.relative_to(tools)) for path in found), name,
+            )
+        )
+    raise ToolNotBuilt("There is no tool called '{}' under tools/.".format(name))
+
+
 def tool_venv_python(name: str) -> Path:
-    """The interpreter of `tools/<name>/.venv`."""
-    root = repo_root() / "tools" / name
-    if not root.is_dir():
-        raise ToolNotBuilt("There is no tool called '{}' under tools/.".format(name))
+    """The interpreter of `tools/<name>/.venv`, nested engines included."""
+    root = _tool_folder(name)
     # bin on POSIX, Scripts on Windows -- uv follows the platform.
     for relative in ("bin/python", "Scripts/python.exe"):
         candidate = root / ".venv" / relative
         if candidate.is_file():
             return candidate
+    where = root.relative_to(repo_root())
+    if not (root / "pyproject.toml").is_file():
+        # A GROUPING folder, not a tool: `tools/ALI` and `tools/AREG` hold their
+        # engines and are not buildable at all. Saying "run uv sync here" sends a
+        # contributor to do something that cannot succeed -- which is what the
+        # message did, and what kept a dead gate looking like a local setup gap.
+        engines = sorted(
+            child.name for child in root.iterdir()
+            if child.is_dir() and (child / "pyproject.toml").is_file()
+        )
+        raise ToolNotBuilt(
+            "{} is a folder of tools, not a tool{}.".format(
+                where,
+                ": name one of " + ", ".join(engines) if engines else "",
+            )
+        )
     raise ToolNotBuilt(
-        "tools/{0} has no .venv. Build it with `cd tools/{0} && uv sync`.".format(name)
+        "{0} has no .venv. Build it with `cd {0} && uv sync`.".format(where)
     )
 
 
@@ -100,7 +167,7 @@ def is_built(name: str) -> bool:
 
 def _package_of(name: str) -> str:
     """The one importable package under `tools/<name>/src/`."""
-    src = repo_root() / "tools" / name / "src"
+    src = _tool_folder(name) / "src"
     packages = sorted(
         path.name for path in src.iterdir() if path.is_dir() and (path / "__init__.py").is_file()
     )
@@ -135,7 +202,7 @@ def run_tool(name: str, timeout: float = 3600, **params):
     """
     python = tool_venv_python(name)
     package = _package_of(name)
-    source = repo_root() / "tools" / name / "src"
+    source = _tool_folder(name) / "src"
 
     with tempfile.TemporaryDirectory(prefix="sadt_testkit_") as scratch:
         params_file = Path(scratch) / "params.json"
@@ -187,7 +254,7 @@ def tool_schema(name: str, timeout: float = 300) -> dict:
     """
     python = tool_venv_python(name)
     describe = repo_root() / "scripts" / "describe.py"
-    tool_dir = repo_root() / "tools" / name
+    tool_dir = _tool_folder(name)
 
     completed = subprocess.run(
         [str(python), str(describe), str(tool_dir)],

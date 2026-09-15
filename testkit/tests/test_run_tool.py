@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from sadt_testkit import (
+    AmbiguousTool,
     ToolFailed,
     ToolNotBuilt,
     is_built,
@@ -55,12 +56,72 @@ def test_an_unknown_tool_says_so():
 def test_an_unbuilt_tool_names_the_command_to_run(tmp_path, monkeypatch):
     """A contributor working on one tool has not built the others."""
     monkeypatch.setattr("sadt_testkit.repo_root", lambda: tmp_path)
-    (tmp_path / "tools" / "ghost").mkdir(parents=True)
+    ghost = tmp_path / "tools" / "ghost"
+    ghost.mkdir(parents=True)
+    # What makes it a TOOL rather than a folder of tools, and the fixture used
+    # to leave it out: the resolver could not tell the two apart, so the
+    # distinction cost nothing. It does now -- see the test below.
+    (ghost / "pyproject.toml").write_text("[project]\nname = 'ghost'\n")
 
     with pytest.raises(ToolNotBuilt, match=r"uv sync"):
         tool_venv_python("ghost")
 
     assert is_built("ghost") is False
+
+
+def test_a_folder_of_tools_is_not_told_to_sync_itself(tmp_path, monkeypatch):
+    """`tools/ALI` holds two engines and has no pyproject of its own.
+
+    Told to run `uv sync` there, a contributor does something that cannot
+    succeed -- and that is what the message said, which is why a gate on
+    `is_built("ALI")` read as a local setup gap instead of a dead path. It
+    names the engines instead.
+    """
+    monkeypatch.setattr("sadt_testkit.repo_root", lambda: tmp_path)
+    group = tmp_path / "tools" / "GROUP"
+    for engine in ("Left", "Right"):
+        (group / engine).mkdir(parents=True)
+        (group / engine / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+
+    with pytest.raises(ToolNotBuilt) as raised:
+        tool_venv_python("GROUP")
+
+    assert "folder of tools" in str(raised.value)
+    assert "Left, Right" in str(raised.value)
+    assert "uv sync" not in str(raised.value)
+
+
+def test_a_nested_engine_is_found_by_its_own_name(tmp_path, monkeypatch):
+    """The whole point: `tools/ALI/ALI_CBCT` answers to "ALI_CBCT".
+
+    It did not, from the day ALI was split until 2026-09-14, and the five tests
+    gated on it skipped in silence -- including the one checking that the
+    published schema still matches `run()`.
+    """
+    monkeypatch.setattr("sadt_testkit.repo_root", lambda: tmp_path)
+    engine = tmp_path / "tools" / "GROUP" / "Engine"
+    (engine / ".venv" / "bin").mkdir(parents=True)
+    (engine / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    (engine / ".venv" / "bin" / "python").chmod(0o755)
+
+    assert tool_venv_python("Engine") == engine / ".venv" / "bin" / "python"
+    assert is_built("Engine") is True
+    # And by its path, which is how a caller disambiguates.
+    assert tool_venv_python("GROUP/Engine") == engine / ".venv" / "bin" / "python"
+
+
+def test_two_engines_of_one_name_refuse_rather_than_guess(tmp_path, monkeypatch):
+    """`is_built` must NOT swallow this. It catches ToolNotBuilt, and an
+    ambiguous name turned into "not built" is a silent skip -- the failure this
+    resolver exists to end, reintroduced one level down."""
+    monkeypatch.setattr("sadt_testkit.repo_root", lambda: tmp_path)
+    for group in ("A", "B"):
+        (tmp_path / "tools" / group / "common").mkdir(parents=True)
+
+    with pytest.raises(AmbiguousTool, match="common"):
+        tool_venv_python("common")
+    with pytest.raises(AmbiguousTool):
+        is_built("common")
 
 
 @needs_template
