@@ -33,11 +33,17 @@ def run(
     scans: Path,
     roi: Path,
     output_dir: Path,
-    suffix: str = "cropped",
+    # Declaration order IS the panel's reading order: a client lays its sections
+    # out in the order the schema first names them. The options come before
+    # `suffix` so the boxes read Inputs, Options, Outputs -- how you crop, then
+    # where it goes. Keyword-only from here, so moving one can never change what
+    # a positional call means.
+    *,
     keep_original_size: bool = False,
     surfaces: Literal["segmentations", "all", "none"] = "segmentations",
     surface_padding_mm: float = 5.0,
     surface_smoothing_iterations: int = 5,
+    suffix: str = "cropped",
 ) -> Path:
     """Crop scans or segmentations to a Region Of Interest drawn in Slicer.
 
