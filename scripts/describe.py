@@ -453,6 +453,59 @@ def supervised_calls(src_dir):
                 )
     return sorted(names)
 
+# What a tool calls to offer a reader a place to stop. Read out of the source
+# the same way `sup.run` is, and for the same reason: the call sites are
+# inside branches only a real run reaches.
+QUALITY_CONTROL = "declareQualityControl"
+
+
+def quality_controls(src_dir):
+    """Every checkpoint this tool offers a reader, in the order it declares them.
+
+    `sup.declareQualityControl("landmarks")` says: here is a point where what
+    has been produced so far is worth looking at before the rest is built on
+    it. A chain already offers one per `sup.run()`; this is for the tool that
+    wants one in the MIDDLE of its own work, where no call boundary exists.
+
+    Sorted by nothing -- declaration order is the order they happen in, and a
+    reader picking where to stop is reading a sequence, not an index.
+
+    The name must be a literal. The same reasoning as `supervised_calls`: a
+    name this cannot see is a name the server cannot publish, and a checkbox
+    list with a hole in it reads as coverage.
+    """
+    found = []
+    for path in sorted(Path(src_dir).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as error:
+            raise SchemaError("{}: {}".format(path, error))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            if not isinstance(function, ast.Attribute) or function.attr != QUALITY_CONTROL:
+                continue
+            if not isinstance(function.value, ast.Name) or function.value.id != SUPERVISOR:
+                continue
+            if not node.args:
+                raise SchemaError(
+                    "{}:{}: {}.{}() is called with no name.".format(
+                        path.name, node.lineno, SUPERVISOR, QUALITY_CONTROL)
+                )
+            first = node.args[0]
+            if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+                raise SchemaError(
+                    "{}:{}: {}.{}()'s name must be a literal, so the server can "
+                    "publish it. Got {}.".format(
+                        path.name, node.lineno, SUPERVISOR, QUALITY_CONTROL,
+                        ast.dump(first)[:60])
+                )
+            if first.value not in found:
+                found.append(first.value)
+    return found
+
+
 def is_supervisor(name, parameter, hints):
     """Whether this parameter is the supervisor, refusing near-misses.
 
@@ -828,6 +881,9 @@ def main(argv=None):
             calls = supervised_calls(src_dir)
             if calls:
                 schema["calls"] = calls
+            stops = quality_controls(src_dir)
+            if stops:
+                schema["quality_controls"] = stops
         schema["source_hash"] = source_hash(src_dir)
     except SchemaError as error:
         sys.stderr.write("{}: {}\n".format(tool_dir.name, error))

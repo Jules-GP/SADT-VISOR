@@ -745,6 +745,77 @@ def test_a_required_tool_named_in_a_loop_is_published(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Quality control: where a reader may be stopped
+
+DECLARES_ONE = """
+    def run(scan: Path, *, sup=None) -> Path:
+        \"\"\"Segment a scan.
+
+        Args:
+            scan: The scan to segment.
+        \"\"\"
+        sup.declareQualityControl("after the crop")
+        return scan
+"""
+
+DECLARES_SEVERAL = """
+    def run(scan: Path, *, sup=None) -> Path:
+        \"\"\"Orient a scan.
+
+        Args:
+            scan: The scan to orient.
+        \"\"\"
+        sup.declareQualityControl("landmarks")
+        if scan.name:
+            sup.run("ASO", scan=scan)
+        sup.declareQualityControl("orientation")
+        sup.declareQualityControl("landmarks")
+        return scan
+"""
+
+DECLARES_A_VARIABLE = """
+    def run(scan: Path, name: str = "x", *, sup=None) -> Path:
+        \"\"\"Do something.
+
+        Args:
+            scan: The scan.
+            name: Where to stop.
+        \"\"\"
+        sup.declareQualityControl(name)
+        return scan
+"""
+
+
+def test_a_declared_checkpoint_is_published(tmp_path):
+    """A tool offering a stop in the MIDDLE of its own work, where no
+    `sup.run()` boundary exists. AMASSS segmenting five structures calls
+    nobody and still has a moment worth looking at."""
+    schema = json.loads(describe(make_tool(tmp_path, DECLARES_ONE)).stdout)
+    assert schema["quality_controls"] == ["after the crop"]
+
+
+def test_they_keep_declaration_order_and_do_not_repeat(tmp_path):
+    """Declaration order is the order they happen in; a reader choosing where
+    to stop is reading a sequence, not an index."""
+    schema = json.loads(describe(make_tool(tmp_path, DECLARES_SEVERAL)).stdout)
+    assert schema["quality_controls"] == ["landmarks", "orientation"]
+    assert schema["calls"] == ["ASO"], "the two are published side by side"
+
+
+def test_a_tool_that_declares_none_publishes_no_key(tmp_path):
+    schema = json.loads(describe(make_tool(tmp_path, SUPERVISED)).stdout)
+    assert "quality_controls" not in schema
+
+
+def test_a_name_the_generator_cannot_read_is_refused(tmp_path):
+    """The same rule as a call name: a name this cannot see is a name the
+    server cannot publish, and a list with a hole in it reads as coverage."""
+    completed = describe(make_tool(tmp_path, DECLARES_A_VARIABLE))
+    assert completed.returncode != 0
+    assert "literal" in completed.stderr
+
+
+# ---------------------------------------------------------------------------
 # vec2: two numbers set together
 
 VEC2 = """
