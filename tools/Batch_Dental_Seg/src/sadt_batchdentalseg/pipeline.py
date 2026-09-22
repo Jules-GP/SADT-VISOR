@@ -38,7 +38,7 @@ from pathlib import Path
 import shutil
 import time
 
-from . import catalogs, nnunet_runner, progress
+from . import catalogs, mesh_export, nnunet_runner, progress
 from .errors import ToolInputError
 from .scans import SCAN_EXTENSIONS, compressed_extension, split_scan_extension
 
@@ -221,6 +221,8 @@ def segment(
     device: str = "cuda",
     tile_step_size: float = 0.5,
     gpu_resampling: bool = True,
+    export_formats=(mesh_export.NIFTI,),
+    surface_decimation: int = 90,
 ) -> dict:
     """Segment every scan under `input_path` with one model bundle.
 
@@ -332,15 +334,23 @@ def segment(
             )
             scan_output_dir = os.path.normpath(os.path.join(output_dir, relative))
 
-            produced = [
-                _write_segmentation(
-                    labels, os.path.join(scan_output_dir, f"{base}_{prediction_ID}{extension}")
-                )
-            ]
-            if separate_segments:
-                produced.extend(
-                    _split_segments(labels, model, base, extension, scan_output_dir, prediction_ID)
-                )
+            produced = []
+            # `separate_segments` splits the VOLUME, so it follows NIFTI: a
+            # caller who asked for meshes only is asking for no volume, and
+            # one binary NIfTI per label is still a volume.
+            if mesh_export.NIFTI in export_formats:
+                produced.append(_write_segmentation(
+                    labels,
+                    os.path.join(scan_output_dir, f"{base}_{prediction_ID}{extension}"),
+                ))
+                if separate_segments:
+                    produced.extend(_split_segments(
+                        labels, model, base, extension, scan_output_dir, prediction_ID
+                    ))
+            produced.extend(mesh_export.write(
+                labels, model, base, scan_output_dir, prediction_ID,
+                export_formats, decimation=surface_decimation,
+            ))
             entry.update(status="ok", segmentations=produced)
         except Exception as exc:  # noqa: BLE001 - one bad scan must not end the batch
             logger.exception("BatchDentalSeg: scan failed")
@@ -365,6 +375,11 @@ def segment(
         # segmentation must be able to see which pipeline made it.
         "gpu_resampling": bool(gpu_resampling) and device.startswith("cuda"),
         "tile_step_size": float(tile_step_size),
+        # Both recorded for the same reason the resampling is: a mesh is a
+        # lossy view of the mask it came from, and whoever opens one has to be
+        # able to see how much of it was thrown away.
+        "export_formats": list(export_formats),
+        "surface_decimation": int(surface_decimation),
         "scans": report_scans,
         "summary": f"{len(succeeded)}/{len(report_scans)} scan(s) segmented",
         "duration_seconds": round(time.monotonic() - started, 2),

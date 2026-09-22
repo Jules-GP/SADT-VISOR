@@ -831,3 +831,158 @@ def test_gpu_resampling_agrees_with_the_scipy_pipeline(tmp_path):
             continue
         dice = 2.0 * int((in_reference & in_test).sum()) / total
         assert dice > 0.97, f"{name}: Dice {dice:.4f} against the scipy pipeline"
+
+
+# ---------------------------------------------------------------------------
+# Export formats
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def stub_blobs(monkeypatch):
+    """An nnUNet stand-in that writes a solid cube per label, clear of the
+    volume border.
+
+    The shared `stub_nnunet` fills whole z-slices spanning the whole image.
+    That is fine for everything that only reads voxels, and useless here:
+    marching cubes returns nothing for a slab with no interior and none for a
+    face pressed against the image boundary, so every mesh came out EMPTY
+    while the file names still looked exactly right.
+    """
+
+    def _install(labels_present=(1, 2, 3)):
+        def predict_folder(model_folder, input_dir, output_dir, device, **kwargs):
+            os.makedirs(output_dir, exist_ok=True)
+            for name in sorted(os.listdir(input_dir)):
+                if not name.endswith("_0000.nii.gz"):
+                    continue
+                case_id = name[: -len("_0000.nii.gz")]
+                reference = sitk.ReadImage(os.path.join(input_dir, name))
+                shape = sitk.GetArrayViewFromImage(reference).shape
+                array = np.zeros(shape, dtype=np.uint8)
+                for index, value in enumerate(labels_present):
+                    start = 2 + index * 7
+                    array[start:start + 6, 2:8, 2:8] = value
+                mask = sitk.GetImageFromArray(array)
+                mask.CopyInformation(reference)
+                sitk.WriteImage(mask, os.path.join(output_dir, f"{case_id}.nii.gz"))
+
+        monkeypatch.setattr(nnunet_runner, "predict_folder", predict_folder)
+        monkeypatch.setattr(nnunet_runner, "resolve_device", lambda requested=None: "cpu")
+
+    return _install
+
+
+def _segment(tmp_path, **kwargs):
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"), size=(24, 24, 24))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+    return pipeline.segment(
+        output_dir=str(tmp_path / "out"),
+        input_path=str(tmp_path / "in"),
+        model_path=str(tmp_path / "models" / "DentalSegmentator"),
+        **kwargs,
+    )
+
+
+def _produced(report):
+    return sorted(os.path.basename(path) for path in segmentation_files(report))
+
+
+def test_the_default_is_the_label_volume_and_nothing_else(tmp_path, stub_blobs):
+    """Every call made before export formats existed meant exactly this, and
+    has to go on meaning it."""
+    stub_blobs(labels_present=(1, 2))
+    report = _segment(tmp_path)
+
+    assert _produced(report) == ["p1_Seg.nii.gz"]
+
+
+def test_a_mesh_is_written_per_label_actually_present(tmp_path, stub_blobs):
+    stub_blobs(labels_present=(1, 3))
+    report = _segment(tmp_path, export_formats=["STL"])
+
+    assert _produced(report) == ["p1_Seg_Upper-Skull.stl", "p1_Seg_Upper-Teeth.stl"]
+
+
+def test_unticking_the_volume_writes_no_volume(tmp_path, stub_blobs):
+    """A caller who wants meshes must not be made to carry a cohort of label
+    volumes to get them."""
+    stub_blobs(labels_present=(1,))
+    report = _segment(tmp_path, export_formats=["VTK"])
+
+    assert not [name for name in _produced(report) if name.endswith(".nii.gz")]
+
+
+def test_separate_segments_follows_the_volume(tmp_path, stub_blobs):
+    """It splits the VOLUME. One binary NIfTI per label is still a volume, so
+    asking for meshes only must not bring forty of them back."""
+    stub_blobs(labels_present=(1, 2))
+    report = _segment(tmp_path, export_formats=["STL"], separate_segments=True)
+
+    assert not [name for name in _produced(report) if name.endswith(".nii.gz")]
+
+
+def test_the_merged_vtk_is_one_file_holding_every_label(tmp_path, stub_blobs):
+    stub_blobs(labels_present=(1, 2, 3))
+    report = _segment(tmp_path, export_formats=["VTK (merged)"])
+    assert _produced(report) == ["p1_Seg_merged.vtk"]
+
+    import vtk
+    reader = vtk.vtkPolyDataReader()
+    reader.SetFileName(segmentation_files(report)[0])
+    reader.ReadAllScalarsOn()
+    reader.Update()
+    labels = reader.GetOutput().GetCellData().GetArray("Label")
+    assert labels is not None, "the merged mesh cannot be separated again"
+    seen = {int(labels.GetTuple1(i)) for i in range(labels.GetNumberOfTuples())}
+    assert seen == {1, 2, 3}
+
+
+def test_two_formats_at_once_write_both(tmp_path, stub_blobs):
+    """And cost ONE marching-cubes pass: the surface is built per label and
+    handed to every writer that was asked for."""
+    stub_blobs(labels_present=(1,))
+    report = _segment(tmp_path, export_formats=["NIFTI", "STL", "OBJ"])
+
+    assert _produced(report) == [
+        "p1_Seg.nii.gz", "p1_Seg_Upper-Skull.obj", "p1_Seg_Upper-Skull.stl",
+    ]
+
+
+def test_reduction_actually_removes_triangles(tmp_path, stub_blobs):
+    """Marching cubes runs on the scan grid, so without this a cohort's meshes
+    are a triangle per voxel face."""
+    import vtk
+
+    def triangles(root, decimation):
+        stub_blobs(labels_present=(1,))
+        report = _segment(root, export_formats=["VTK"], surface_decimation=decimation)
+        reader = vtk.vtkPolyDataReader()
+        reader.SetFileName(segmentation_files(report)[0])
+        reader.Update()
+        return reader.GetOutput().GetNumberOfCells()
+
+    raw = triangles(tmp_path / "a", 0)
+    reduced = triangles(tmp_path / "b", 90)
+    assert raw > 0
+    assert reduced < raw, "surface_decimation moved nothing"
+
+
+def test_the_report_says_what_was_asked_for(tmp_path, stub_blobs):
+    """A mesh is a lossy view of the mask it came from, so whoever opens one
+    has to be able to see how much was thrown away."""
+    stub_blobs(labels_present=(1,))
+    report = _segment(tmp_path, export_formats=["NIFTI", "STL"], surface_decimation=50)
+
+    assert report["export_formats"] == ["NIFTI", "STL"]
+    assert report["surface_decimation"] == 50
+
+
+def test_every_format_the_panel_offers_can_be_written(tmp_path, stub_blobs):
+    """The layout renders `mesh_export.FORMATS`; a name in that tuple that no
+    writer knows would be a chip that produces nothing."""
+    from sadt_batchdentalseg import mesh_export
+
+    stub_blobs(labels_present=(1,))
+    report = _segment(tmp_path, export_formats=list(mesh_export.FORMATS))
+    extensions = {os.path.splitext(name)[1] for name in _produced(report)}
+    assert extensions == {".gz", ".stl", ".obj", ".vtk"}

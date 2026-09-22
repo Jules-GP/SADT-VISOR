@@ -19,6 +19,10 @@ def run(
     device: Literal["cuda", "cpu"] = "cuda",
     tile_step_size: float = 0.5,
     gpu_resampling: bool = True,
+    export_formats: list[
+        Literal["NIFTI", "STL", "OBJ", "VTK", "VTK (merged)"]
+    ] = ["NIFTI"],
+    surface_decimation: int = 90,
 ) -> Path:
     """Segment teeth and jaw structures on a dental CT or CBCT scan.
 
@@ -68,6 +72,23 @@ def run(
             smaller than about 40 GiB, pass false for THAT bundle. See README,
             "GPU resampling". Recorded in the run report either way.
 
+        export_formats: What comes out. NIFTI is the label volume this tool
+            has always written; the rest are surfaces, one file per label the
+            network actually emitted, except "VTK (merged)" which is a single
+            file holding every surface with a `Label` cell array. Ticking
+            several costs one marching-cubes pass, not one per format.
+
+            NIFTI alone by default, which is what every earlier call meant.
+            Untick it and no volume is written -- a caller who wants meshes
+            only is not made to carry a cohort of label volumes for them.
+        surface_decimation: Percentage of triangles dropped from every
+            surface, 0 to 99. It applies to the mesh formats and to nothing
+            else. Marching cubes runs on the scan grid, so a 0.33 mm CBCT
+            yields a triangle per voxel face -- detail a mask accurate to
+            about half a voxel does not carry, and enough of it to make a
+            cohort's meshes awkward to ship and slow to open. 0 keeps the raw
+            mesh.
+
     Returns:
         The output directory, holding the segmentations and the run report. The
         report carries the model's label table -- the segmentation is a volume
@@ -86,5 +107,7 @@ def run(
         device=device,
         tile_step_size=tile_step_size,
         gpu_resampling=gpu_resampling,
+        export_formats=list(export_formats or []),
+        surface_decimation=surface_decimation,
     )
     return output_dir
