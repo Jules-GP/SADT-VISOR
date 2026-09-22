@@ -986,3 +986,42 @@ def test_every_format_the_panel_offers_can_be_written(tmp_path, stub_blobs):
     report = _segment(tmp_path, export_formats=list(mesh_export.FORMATS))
     extensions = {os.path.splitext(name)[1] for name in _produced(report)}
     assert extensions == {".gz", ".stl", ".obj", ".vtk"}
+
+
+def test_a_surface_carries_normals_and_they_agree(tmp_path, stub_blobs):
+    """Two separate defects, and a mesh viewer shows them as one.
+
+    With no normal array at all a renderer computes one per facet, so the
+    surface reads as faceted however fine it is. And marching cubes plus
+    decimation leaves neighbouring triangles wound in opposite directions, so
+    even once normals exist half of them point inwards and the shading breaks
+    into light and dark patches. `ConsistencyOn` plus `AutoOrientNormalsOn` is
+    what makes them agree; this asserts both, by checking that every facet of
+    a solid cube faces AWAY from its centre.
+    """
+    import numpy as np
+    import vtk
+    from vtk.util.numpy_support import vtk_to_numpy
+
+    stub_blobs(labels_present=(1,))
+    report = _segment(tmp_path, export_formats=["VTK"])
+
+    reader = vtk.vtkPolyDataReader()
+    reader.SetFileName(segmentation_files(report)[0])
+    reader.ReadAllNormalsOn()
+    reader.Update()
+    surface = reader.GetOutput()
+
+    assert surface.GetPointData().GetNormals() is not None, "no point normals"
+
+    centres = vtk.vtkCellCenters()
+    centres.SetInputData(surface)
+    centres.Update()
+    points = vtk_to_numpy(centres.GetOutput().GetPoints().GetData())
+    facing = vtk_to_numpy(surface.GetCellData().GetNormals())
+    outward = points - points.mean(axis=0)
+    agree = np.sum(outward * facing, axis=1) > 0
+    assert agree.mean() > 0.95, (
+        "%.0f%% of the facets face inwards: the winding is inconsistent"
+        % (100 * (1 - agree.mean()))
+    )

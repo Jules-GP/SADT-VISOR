@@ -222,7 +222,7 @@ def segment(
     tile_step_size: float = 0.5,
     gpu_resampling: bool = True,
     export_formats=(mesh_export.NIFTI,),
-    surface_decimation: int = 90,
+    surface_decimation: int = 50,
 ) -> dict:
     """Segment every scan under `input_path` with one model bundle.
 
