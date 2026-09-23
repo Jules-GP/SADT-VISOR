@@ -538,7 +538,6 @@ def _predict_landmarks(
         LANDMARK_TOOL,
         input=centered_root,
         landmarks=list(requested),
-        prediction_ID="Pred",
         **({"model": landmark_model} if landmark_model else {}),
     )
     # A tool returns a Path, or a dict of named ones. The landmark tool returns

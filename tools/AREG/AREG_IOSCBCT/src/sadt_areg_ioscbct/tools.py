@@ -131,7 +131,6 @@ def predict_cbct_landmarks(sup, scan_dir: str, model_path: str) -> str:
         "input": scan_dir,
         "output_dir": _output(sup, "ALI_CBCT"),
         "landmarks": list(CBCT_LANDMARKS),
-        "prediction_ID": "Pred",
     }
     if model_path:
         parameters["model"] = model_path
@@ -152,7 +151,6 @@ def predict_ios_landmarks(sup, mesh_dir: str, model_path: str) -> str:
         "input": mesh_dir,
         "output_dir": _output(sup, "ALI_IOS"),
         "networks": ["Occlusal"],
-        "prediction_ID": "Pred",
     }
     if model_path:
         parameters["model"] = model_path

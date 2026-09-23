@@ -687,9 +687,20 @@ def test_the_run_report_lands_beside_the_results(tmp_path, stub_agent, cbct_envi
     assert written["model_bundle"] == "bundle"
 
 
-def test_prediction_id_reaches_the_file_names(tmp_path, stub_agent, cbct_environment):
-    """`SaveId` existed in the Slicer UI and was read by nothing; the suffix
-    was hardcoded in both CLIs."""
+def test_the_marker_is_constant_and_is_what_the_tool_publishes(
+        tmp_path, stub_agent, cbct_environment):
+    """It used to be an argument, `prediction_ID`, defaulting to "Pred".
+
+    That made the marker a property of the REQUEST, so nothing downstream
+    could predict it -- and pairing a scan with its landmarks, or working out
+    which results belong to one patient, both have to strip a marker they can
+    predict. A caller wanting to label a run labels the output FOLDER.
+
+    Asserted against `OUTPUT_SUFFIXES` rather than against the string, so the
+    file this tool writes and the marker it publishes cannot drift apart.
+    """
+    from sadt_ali_cbct import OUTPUT_SUFFIXES
+
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
 
@@ -697,9 +708,14 @@ def test_prediction_id_reaches_the_file_names(tmp_path, stub_agent, cbct_environ
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        prediction_ID="T1",
     )
-    assert [p.name for p in output_dir.rglob("*.mrk.json")] == ["patient01_lm_T1.mrk.json"]
+    written = [p.name for p in output_dir.rglob("*.mrk.json")]
+    assert written == ["patient01_lm_Pred.mrk.json"]
+    assert any(name.startswith("patient01" + suffix.rstrip("_"))
+               or suffix in name for name in written
+               for suffix in OUTPUT_SUFFIXES), (
+        "the marker written and the marker published have drifted apart"
+    )
 
 
 # ---------------------------------------------------------------------------

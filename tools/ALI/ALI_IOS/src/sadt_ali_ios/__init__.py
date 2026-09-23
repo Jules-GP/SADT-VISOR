@@ -17,6 +17,23 @@ from typing import Literal
 
 from .dispatch import identify
 
+# What this engine appends to the name it was handed, and it is a CONSTANT.
+# It used to be an argument, `prediction_ID`, defaulting to "Pred". That made
+# the marker a property of the REQUEST rather than of the tool, so nothing
+# downstream could know it: pairing a scan with its landmarks, and working out
+# which results belong to one patient, both have to strip a marker they can
+# predict. A caller wanting to label a run labels the output FOLDER, which
+# costs nobody a guess.
+#
+# Published through `OUTPUT_SUFFIXES` below, which is how the server learns it
+# without holding a table of dental names.
+PREDICTION_ID = "Pred"
+
+# Only the part that identifies the tool, not the whole written name: a file
+# is `<patient>_lm_Pred.mrk.json`, and cutting at `_lm` is what recovers the
+# patient whatever follows it.
+OUTPUT_SUFFIXES = ("_lm_Pred", "_lm")
+
 
 def run(
     input: Path,
@@ -64,7 +81,6 @@ def run(
             "LR2MG", "LR3MG", "LR4MG", "LR5MG", "LR6MG",
         ]
     ] = [],
-    prediction_ID: str = "Pred",
     device: Literal["cuda", "cpu"] = "cuda",
     *,
     sup=None,
@@ -93,7 +109,6 @@ def run(
             what lets a caller ask for the points it needs instead of taking a
             whole family to use three of them. Left empty, `networks` decides,
             which is what a client showing no family control relies on.
-        prediction_ID: Suffix used in output names, e.g. `scan_lm_Pred.mrk.json`.
         device: "cuda" or "cpu". CUDA falls back to CPU when no card is
             visible, with a warning.
 
@@ -122,7 +137,7 @@ def run(
         output_dir=str(output_dir),
         ios_networks=networks,
         landmarks=landmarks,
-        prediction_ID=prediction_ID,
+        prediction_ID=PREDICTION_ID,
         device=device,
         sup=sup,
     )
