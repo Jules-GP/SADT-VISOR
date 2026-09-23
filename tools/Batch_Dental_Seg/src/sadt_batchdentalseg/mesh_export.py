@@ -162,7 +162,7 @@ def _write(polydata, writer_name: str, destination: str, binary: bool) -> str:
 
 
 def write(labels, model, base: str, output_dir: str, suffix: str,
-          formats, smoothing: int = 30, decimation: int = 50) -> list:
+          formats, smoothing: int = 30, decimation: int = 0) -> list:
     """Write every surface format in `formats`. Returns what it wrote.
 
     `labels` is the multi-label volume as SimpleITK read it, so the surfaces

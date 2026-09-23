@@ -1040,3 +1040,24 @@ def test_a_surface_is_wound_consistently_and_carries_no_normals(tmp_path, stub_b
     assert outward.mean() > 0.95, (
         "%.0f%% of the facets face inwards" % (100 * (1 - outward.mean()))
     )
+
+
+def test_the_default_keeps_every_triangle_marching_cubes_made(tmp_path, stub_blobs):
+    """Parity with the module this replaces, which exports Slicer's closed
+    surface representation with `Decimation factor = 0.0`. An earlier default
+    of 90 was borrowed from AMASSS without being remeasured and cost a factor
+    of ten in detail -- on one real segmentation, 11852 triangles against
+    1184 for the same tooth."""
+    import vtk
+
+    stub_blobs(labels_present=(1,))
+    default = _segment(tmp_path / "a", export_formats=["VTK"])
+    asked = _segment(tmp_path / "b", export_formats=["VTK"], surface_decimation=90)
+
+    def cells(report):
+        reader = vtk.vtkPolyDataReader()
+        reader.SetFileName(segmentation_files(report)[0])
+        reader.Update()
+        return reader.GetOutput().GetNumberOfCells()
+
+    assert cells(default) > cells(asked), "the default is decimating something"

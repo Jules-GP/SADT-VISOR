@@ -22,7 +22,7 @@ def run(
     export_formats: list[
         Literal["NIFTI", "STL", "OBJ", "VTK", "VTK (merged)"]
     ] = ["NIFTI"],
-    surface_decimation: int = 50,
+    surface_decimation: int = 0,
 ) -> Path:
     """Segment teeth and jaw structures on a dental CT or CBCT scan.
 
@@ -83,18 +83,21 @@ def run(
             only is not made to carry a cohort of label volumes for them.
         surface_decimation: Percentage of triangles dropped from every
             surface, 0 to 99. It applies to the mesh formats and to nothing
-            else. Marching cubes runs on the scan grid, so a 0.33 mm CBCT
-            yields a triangle per voxel face -- detail a mask accurate to
-            about half a voxel does not carry. 0 keeps the raw mesh.
+            else.
 
-            50 rather than the 90 AMASSS uses, and the difference is the size
-            of the structure. AMASSS decimates a cranial base of 1.6 million
-            triangles, where 90 percent still leaves plenty; a tooth is about
-            15 thousand to begin with. Measured on a tooth-sized sphere at
-            0.33 mm, the mean angle between adjacent facets goes 10.6 degrees
-            (raw), 18.4 (50 percent), 39.8 (90) while the surface moves by
-            0.046, 0.061 and 0.100 mm -- so past about half, the faceting
-            climbs steeply for a saving that no longer matters.
+            0, which is parity with the module this replaces: that one
+            exports Slicer's closed surface representation, whose
+            `Decimation factor` is 0.0, and at 0 the two agree to the byte.
+            Measured on one real UniversalLab segmentation at 0.33 mm, label
+            8: 11852 triangles and 592684 bytes of STL either way.
+
+            An earlier version defaulted to 90, borrowed from AMASSS without
+            being remeasured, and that was wrong here. AMASSS decimates a
+            cranial base of 1.6 million triangles, where 90 percent costs
+            0.059 mm and stops Slicer freezing on a 41.9 MB archive; a tooth
+            is 11852 triangles, three orders of magnitude below the problem
+            that rule was written for. It cost a factor of ten in detail for
+            a saving nobody needed.
 
     Returns:
         The output directory, holding the segmentations and the run report. The
