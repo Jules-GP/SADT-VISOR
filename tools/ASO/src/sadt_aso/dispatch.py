@@ -78,7 +78,7 @@ class OrientationRun:
 
     @property
     def patients(self) -> dict:
-        return self.report["patients"]
+        return self.report["cases"]
 
     @property
     def succeeded(self) -> list:
@@ -91,7 +91,7 @@ class OrientationRun:
         return [
             os.path.join(self.output_dir, relative)
             for entry in self.patients.values()
-            for relative in entry.get("outputs", [])
+            for relative in entry.get("produced", [])
         ]
 
 
@@ -157,7 +157,7 @@ def orient(
         "automation": automation,
         "output_suffix": suffix,
         "reference": os.path.basename(str(reference_path).rstrip(os.sep)),
-        "patients": {},
+        "cases": {},
     }
 
     try:
@@ -718,7 +718,7 @@ def _run_cbct(
         try:
             image, translation = cbct_pipeline.prepare(entry["scan"], destination)
         except RuntimeError as exc:
-            report["patients"][key] = {"status": "failed", "reason": str(exc)}
+            report["cases"][key] = {"status": "failed", "reason": str(exc)}
             continue
         prepared[key] = {
             # Kept in RAM only when it is used next -- a predicted patient's
@@ -762,7 +762,7 @@ def _run_cbct(
     for index, (key, entry) in enumerate(sorted(prepared.items()), start=1):
         progress.report(index, len(prepared), "orienting patient", start=registration_start)
         if not entry["landmarks"]:
-            report["patients"][key] = {
+            report["cases"][key] = {
                 "status": "failed",
                 "reason": (
                     "no predicted landmarks for this scan"
@@ -781,7 +781,7 @@ def _run_cbct(
 
             image = sitk.ReadImage(entry["centered_path"])
         try:
-            report["patients"][key] = cbct_pipeline.orient_patient(
+            report["cases"][key] = cbct_pipeline.orient_patient(
                 centered=image,
                 pre_transform=entry["translation"],
                 source_landmarks=entry["landmarks"],
@@ -795,7 +795,7 @@ def _run_cbct(
                 seed=seed,
             )
         except cbct_pipeline.icp.RegistrationError as exc:
-            report["patients"][key] = {"status": "failed", "reason": str(exc)}
+            report["cases"][key] = {"status": "failed", "reason": str(exc)}
         entry["image"] = None  # a batch must not hold every volume in RAM
 
 
@@ -834,7 +834,7 @@ def _run_ios(
 
     for index, (key, entry) in enumerate(sorted(patients.items()), start=1):
         progress.report(index, len(patients), "orienting patient")
-        report["patients"][key] = ios_pipeline.orient_patient(
+        report["cases"][key] = ios_pipeline.orient_patient(
             jaws=entry,
             reference=reference,
             automation=automation,
@@ -853,7 +853,7 @@ def _run_ios(
     # Unconditional now. It only fires when EVERY jaw failed for want of tooth
     # labels, which can only happen on the centroid path -- there is no mode to
     # test for any more.
-    _reject_if_nothing_was_labelled(report["patients"])
+    _reject_if_nothing_was_labelled(report["cases"])
 
 
 def _has_surface(entry: dict) -> bool:
@@ -927,9 +927,9 @@ def _as_directory(path: str, destination: str) -> str:
 
 
 def _summarize(report: dict) -> None:
-    statuses = [entry.get("status") for entry in report["patients"].values()]
+    statuses = [entry.get("status") for entry in report["cases"].values()]
     report["summary"] = {
-        "patients": len(statuses),
+        "cases": len(statuses),
         "oriented": statuses.count("ok"),
         "failed": statuses.count("failed"),
     }
@@ -938,5 +938,5 @@ def _summarize(report: dict) -> None:
         report["modality"],
         report["automation"],
         report["summary"]["oriented"],
-        report["summary"]["patients"],
+        report["summary"]["cases"],
     )

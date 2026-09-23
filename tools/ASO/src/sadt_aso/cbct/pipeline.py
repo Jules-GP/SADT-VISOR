@@ -377,7 +377,7 @@ def orient_patient(
         "status": "ok",
         "landmarks_used": registration.used,
         "landmarks_dropped": registration.dropped,
-        "outputs": sorted(
+        "produced": sorted(
             os.path.relpath(path, output_dir)
             for path in (scan_output, landmark_output, transform_output)
         ),
