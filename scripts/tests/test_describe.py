@@ -791,15 +791,59 @@ def test_a_declared_checkpoint_is_published(tmp_path):
     `sup.run()` boundary exists. AMASSS segmenting five structures calls
     nobody and still has a moment worth looking at."""
     schema = json.loads(describe(make_tool(tmp_path, DECLARES_ONE)).stdout)
-    assert schema["quality_controls"] == ["after the crop"]
+    assert schema["quality_controls"] == [
+        {"name": "after the crop", "kind": "view"}
+    ], "a checkpoint that says nothing is somewhere to LOOK, not to come back to"
 
 
 def test_they_keep_declaration_order_and_do_not_repeat(tmp_path):
     """Declaration order is the order they happen in; a reader choosing where
     to stop is reading a sequence, not an index."""
     schema = json.loads(describe(make_tool(tmp_path, DECLARES_SEVERAL)).stdout)
-    assert schema["quality_controls"] == ["landmarks", "orientation"]
+    assert [entry["name"] for entry in schema["quality_controls"]] == [
+        "landmarks", "orientation"]
     assert schema["calls"] == ["ASO"], "the two are published side by side"
+
+
+DECLARES_A_KIND = """
+    def run(scan: Path, *, sup=None) -> Path:
+        \"\"\"Segment a scan.
+
+        Args:
+            scan: The scan to segment.
+        \"\"\"
+        sup.declareQualityControl("the landmarks", kind="landmarks")
+        return scan
+"""
+
+DECLARES_A_BAD_KIND = """
+    def run(scan: Path, *, sup=None) -> Path:
+        \"\"\"Segment a scan.
+
+        Args:
+            scan: The scan to segment.
+        \"\"\"
+        sup.declareQualityControl("the landmarks", kind="editable")
+        return scan
+"""
+
+
+def test_a_checkpoint_says_what_may_be_edited_there(tmp_path):
+    """Which is what decides whether a reader can come BACK to it from a
+    later stop. Looking at a bad orientation is useless without a way back to
+    the landmarks that caused it."""
+    schema = json.loads(describe(make_tool(tmp_path, DECLARES_A_KIND)).stdout)
+    assert schema["quality_controls"] == [
+        {"name": "the landmarks", "kind": "landmarks"}
+    ]
+
+
+def test_a_kind_no_reviewer_implements_is_refused(tmp_path):
+    """The three kinds are what the reviewer knows how to put on screen. A
+    fourth would publish a checkpoint promising an edit nothing can make."""
+    completed = describe(make_tool(tmp_path, DECLARES_A_BAD_KIND))
+    assert completed.returncode != 0
+    assert "kind must be one of" in completed.stderr
 
 
 def test_a_tool_that_declares_none_publishes_no_key(tmp_path):

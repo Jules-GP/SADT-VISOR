@@ -458,9 +458,27 @@ def supervised_calls(src_dir):
 # inside branches only a real run reaches.
 QUALITY_CONTROL = "declareQualityControl"
 
+# What a reader may DO at a checkpoint, and therefore whether it is somewhere
+# to come BACK to. The three are the local module's, unchanged: it already
+# drew this distinction across two pipelines and it is the right one.
+#
+#   view          look at the result, then carry on. Nothing to edit here.
+#   landmarks     drag the points; they are saved back to their own file.
+#   registration  drag the scan; the move is folded into its matrix.
+#
+# `view` is the default, and that is the conservative direction: a checkpoint
+# nobody declared as editable never offers a reader a way back to it, so a
+# tool that says nothing cannot promise something it does not support.
+REVIEW_VIEW = "view"
+REVIEW_KINDS = (REVIEW_VIEW, "landmarks", "registration")
+
 
 def quality_controls(src_dir):
     """Every checkpoint this tool offers a reader, in the order it declares them.
+
+    Each entry is `{"name": ..., "kind": ...}`. The kind says what a reader
+    may DO there, and therefore whether it is somewhere to come back to from
+    a later stop -- see REVIEW_KINDS.
 
     `sup.declareQualityControl("landmarks")` says: here is a point where what
     has been produced so far is worth looking at before the rest is built on
@@ -501,8 +519,20 @@ def quality_controls(src_dir):
                         path.name, node.lineno, SUPERVISOR, QUALITY_CONTROL,
                         ast.dump(first)[:60])
                 )
-            if first.value not in found:
-                found.append(first.value)
+            kind = REVIEW_VIEW
+            for keyword in node.keywords:
+                if keyword.arg != "kind":
+                    continue
+                if (not isinstance(keyword.value, ast.Constant)
+                        or keyword.value.value not in REVIEW_KINDS):
+                    raise SchemaError(
+                        "{}:{}: {}.{}()'s kind must be one of {}. Got {}.".format(
+                            path.name, node.lineno, SUPERVISOR, QUALITY_CONTROL,
+                            ", ".join(REVIEW_KINDS), ast.dump(keyword.value)[:60])
+                    )
+                kind = keyword.value.value
+            if first.value not in [entry["name"] for entry in found]:
+                found.append({"name": first.value, "kind": kind})
     return found
 
 
