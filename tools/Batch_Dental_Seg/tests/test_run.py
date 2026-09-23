@@ -1112,3 +1112,49 @@ def test_a_surface_does_not_keep_the_voxel_staircase():
         "mean angle between adjacent facets is %.1f degrees: the staircase is "
         "still there" % np.mean(angles)
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-class resampling
+# ---------------------------------------------------------------------------
+
+def test_resampling_class_by_class_gives_the_same_labels():
+    """The whole claim, and it is an equality rather than a tolerance.
+
+    Resampling is purely spatial: every class is interpolated independently
+    of the others, so doing them together or one after another is the same
+    arithmetic and the argmax over the results is the same argmax. What it
+    buys is that the block of 55 classes -- 19.6 GiB at full scale -- is
+    never built.
+    """
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("nnunetv2")
+    from nnunetv2.preprocessing.resampling.resample_torch import resample_torch_fornnunet
+    from sadt_batchdentalseg import low_memory
+
+    classes, source, target = 12, (20, 22, 18), [26, 28, 23]
+    current, new = (0.4, 0.4, 0.4), (0.33, 0.33, 0.33)
+    torch.manual_seed(0)
+    data = torch.rand((classes,) + source, dtype=torch.float32)
+    options = {"is_seg": False, "device": torch.device("cpu"), "mode": "linear"}
+
+    stock = resample_torch_fornnunet(data, target, current, new, **options).argmax(0)
+    ours = low_memory._take_labels(
+        low_memory._per_class(data, target, current, new, **options))
+
+    assert ours.shape == stock.shape
+    assert torch.equal(ours.to(stock.dtype), stock), (
+        "%d of %d voxels differ" % ((ours != stock).sum().item(), stock.numel())
+    )
+
+
+def test_both_halves_are_installed_or_neither():
+    """The resampler returns ONE channel holding the argmax. nnUNet's own
+    argmax asserts one channel per class, so installing the resampler without
+    the replacement would fail that assert on the first patient."""
+    from sadt_batchdentalseg import low_memory
+
+    class _NoLabelManager:
+        configuration_manager = None
+
+    assert low_memory.install(_NoLabelManager()) is False
