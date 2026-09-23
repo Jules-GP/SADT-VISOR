@@ -846,6 +846,54 @@ def test_a_kind_no_reviewer_implements_is_refused(tmp_path):
     assert "kind must be one of" in completed.stderr
 
 
+NAMES_ITS_OUTPUTS = """
+    OUTPUT_SUFFIXES = ("_Or", "_lm_Or", "_Or_transform")
+
+    def run(scan: Path) -> Path:
+        \"\"\"Orient a scan.
+
+        Args:
+            scan: The scan to orient.
+        \"\"\"
+        return scan
+"""
+
+NAMES_THEM_WITHOUT_A_SEPARATOR = """
+    OUTPUT_SUFFIXES = ("Or",)
+
+    def run(scan: Path) -> Path:
+        \"\"\"Orient a scan.
+
+        Args:
+            scan: The scan to orient.
+        \"\"\"
+        return scan
+"""
+
+
+def test_a_tool_says_what_it_appends_to_a_name(tmp_path):
+    """The server has to know which results are about one patient, to replay
+    a chain for the cases a clinician marked. It must not learn that from a
+    table of its own: it knows no dental tool. So the tool says."""
+    schema = json.loads(describe(make_tool(tmp_path, NAMES_ITS_OUTPUTS)).stdout)
+    assert schema["output_suffixes"] == ["_Or_transform", "_lm_Or", "_Or"], (
+        "longest first, or a caller strips `_Or` from inside `_Or_transform`"
+    )
+
+
+def test_a_marker_that_does_not_separate_is_refused(tmp_path):
+    """`Or` without its underscore cuts inside any patient whose name holds
+    those two letters."""
+    completed = describe(make_tool(tmp_path, NAMES_THEM_WITHOUT_A_SEPARATOR))
+    assert completed.returncode != 0
+    assert "must begin with" in completed.stderr
+
+
+def test_a_tool_that_names_nothing_publishes_no_key(tmp_path):
+    schema = json.loads(describe(make_tool(tmp_path, GOOD)).stdout)
+    assert "output_suffixes" not in schema
+
+
 def test_a_tool_that_declares_none_publishes_no_key(tmp_path):
     schema = json.loads(describe(make_tool(tmp_path, SUPERVISED)).stdout)
     assert "quality_controls" not in schema

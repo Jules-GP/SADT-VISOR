@@ -35,6 +35,18 @@ PATIENT_SUFFIXES = (
     "_lm_Pred", "_Scanreg", "_MERGED", "_scan", "_Scan", "_Or", "_OR", "_lm",
 )
 
+# The same markers, PUBLISHED. `describe.py` reads this name out of the source
+# and puts it in the schema, so a server that has to work out which results
+# belong to one patient -- to replay a chain for the cases a clinician marked
+# and leave the rest alone -- can do it without holding a table of its own.
+# It knows no dental tool, and this is how that stays true.
+#
+# Only the STABLE part of each marker. What this tool appends is
+# `_{output_suffix}` and what ALI appends is `_lm_{prediction_ID}`, both
+# caller-controlled: `_Or` is a default, `_lm` is the part that does not
+# move. Cutting at the earliest match handles the rest.
+OUTPUT_SUFFIXES = PATIENT_SUFFIXES
+
 # One separator character, for asking whether a suffix match ends where a token
 # ends. The same four the sibling engines split names on -- `ios/pipeline.py`'s
 # `_SPLIT` and the shared `sadt_areg_common.pairing` both use `_ - .`, and

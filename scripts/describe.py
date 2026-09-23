@@ -473,6 +473,97 @@ REVIEW_VIEW = "view"
 REVIEW_KINDS = (REVIEW_VIEW, "landmarks", "registration")
 
 
+# What a tool appends to the name of what it was given. ASO hands back
+# `P1_Or.nii.gz` for the `P1.nii.gz` it received; ALI hands back
+# `P1_lm_Pred.mrk.json`.
+OUTPUT_SUFFIXES = "OUTPUT_SUFFIXES"
+
+
+def output_suffixes(src_dir):
+    """The markers this tool adds to the name of the file it was handed.
+
+    **Why this is published rather than known.** The server has to work out,
+    from a folder of results, which of them are about the same patient -- to
+    replay a chain for the three cases a clinician marked and leave the other
+    thirty-seven alone. Deriving that means stripping the markers tools
+    append, and a table of those markers inside the server would be the
+    server knowing what ALI and ASO call their outputs. It knows no dental
+    tool, and that is the property the whole architecture is arranged around.
+
+    So the tool says. It is the one writing the name, it is the only place
+    the fact is not a guess, and a tool that renames its outputs updates one
+    tuple beside them instead of a table in another repository.
+
+    Declared as a module-level tuple of string literals anywhere under
+    `src/`:
+
+        OUTPUT_SUFFIXES = ("_Or", "_Or_transform", "_lm_Or")
+
+    Read by AST for the same reason `supervised_calls` is: importing a tool
+    to ask it a question costs a CUDA stack, and CI asks this on every push.
+    """
+    found = []
+    for path in sorted(Path(src_dir).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as error:
+            raise SchemaError("{}: {}".format(path, error))
+        # Module-level sequences, so the declaration may POINT at the table a
+        # tool already keeps rather than repeat it. ASO derives the patient a
+        # file belongs to for its own pairing and has carried that tuple for
+        # as long as it has paired anything; making it write the same strings
+        # twice is how the two drift.
+        sequences = {
+            target.id: node.value
+            for node in tree.body if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+            and isinstance(node.value, (ast.Tuple, ast.List))
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if OUTPUT_SUFFIXES not in names:
+                continue
+            value = node.value
+            if isinstance(value, ast.Name):
+                value = sequences.get(value.id)
+                if value is None:
+                    raise SchemaError(
+                        "{}:{}: {} names {!r}, which is not a tuple or list "
+                        "declared at module level in this file.".format(
+                            path.name, node.lineno, OUTPUT_SUFFIXES, node.value.id)
+                    )
+            if not isinstance(value, (ast.Tuple, ast.List)):
+                raise SchemaError(
+                    "{}:{}: {} must be a tuple or list of string literals.".format(
+                        path.name, node.lineno, OUTPUT_SUFFIXES)
+                )
+            for element in value.elts:
+                if not isinstance(element, ast.Constant) or not isinstance(
+                        element.value, str):
+                    raise SchemaError(
+                        "{}:{}: every {} entry must be a string literal, so the "
+                        "server can publish it. Got {}.".format(
+                            path.name, node.lineno, OUTPUT_SUFFIXES,
+                            ast.dump(element)[:60])
+                    )
+                if not element.value.startswith("_"):
+                    # The marker is what SEPARATES it from the name, so it has
+                    # to carry the separator. Without it `Or` would cut inside
+                    # any patient whose name contains those two letters.
+                    raise SchemaError(
+                        "{}:{}: {} entry {!r} must begin with '_'.".format(
+                            path.name, node.lineno, OUTPUT_SUFFIXES, element.value)
+                    )
+                if element.value not in found:
+                    found.append(element.value)
+    # Longest first, so a caller stripping them cannot cut inside a compound:
+    # `_lm_Pred` has to be tried before `_lm`.
+    return sorted(found, key=len, reverse=True)
+
+
 def quality_controls(src_dir):
     """Every checkpoint this tool offers a reader, in the order it declares them.
 
@@ -914,6 +1005,13 @@ def main(argv=None):
             stops = quality_controls(src_dir)
             if stops:
                 schema["quality_controls"] = stops
+        # Outside that guard, unlike the two above: what a tool calls its
+        # outputs has nothing to do with whether it takes a supervisor, and
+        # the tool this matters most for is a LEAF. ALI drives nobody and it
+        # is its `_lm_Pred` that says which landmarks belong to which patient.
+        suffixes = output_suffixes(src_dir)
+        if suffixes:
+            schema["output_suffixes"] = suffixes
         schema["source_hash"] = source_hash(src_dir)
     except SchemaError as error:
         sys.stderr.write("{}: {}\n".format(tool_dir.name, error))
