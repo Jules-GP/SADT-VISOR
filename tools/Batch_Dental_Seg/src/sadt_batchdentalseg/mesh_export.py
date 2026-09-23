@@ -116,31 +116,15 @@ def _surface(mask, reference, smoothing: int, decimation: int):
         decimator.Update()
         polydata = decimator.GetOutput()
 
-    # LAST, and not optional. Without this the mesh carries no normal at all,
-    # so a renderer computes one per facet and the surface reads as faceted
-    # however fine it is -- which is what "the VTK is not smooth" was.
-    #
-    # `ConsistencyOn` is the other half, and the measurable one: marching
-    # cubes plus decimation leaves neighbouring triangles wound in opposite
-    # directions, so their normals point opposite ways and the shading breaks
-    # into light and dark patches. Measured on a sphere, the mean angle
-    # between adjacent facets fell from 39.8 to 25.2 degrees purely by making
-    # the winding agree -- no vertex moved.
-    normals = vtk.vtkPolyDataNormals()
-    normals.SetInputData(polydata)
-    # Point normals are what makes a coarse mesh shade smoothly; cell normals
-    # are kept because some readers want the facet's own.
-    normals.ComputePointNormalsOn()
-    normals.ComputeCellNormalsOn()
-    normals.ConsistencyOn()
-    normals.AutoOrientNormalsOn()
-    # Splitting at 60 degrees so a genuine edge -- an incisal edge, a cusp --
-    # stays sharp instead of being averaged into a rounded blur. A surface
-    # with no such edge is not split at all, so a tooth pays nothing for it.
-    normals.SplittingOn()
-    normals.SetFeatureAngle(60)
-    normals.Update()
-    return normals.GetOutput()
+    # No normals are written, deliberately. A reader that shades a surface
+    # computes them anyway, and the two reasons for baking them in did not
+    # survive being measured: marching cubes already returns a consistently
+    # wound mesh -- 100 percent of the facets of a sphere face outwards
+    # before any filter runs -- and the apparent smoothing gain came from
+    # `SplittingOn` duplicating points, which hid a third of the shared edges
+    # from the metric rather than improving anything. Same triangles, same
+    # vertices, and the file carries nothing a viewer cannot derive.
+    return polydata
 
 
 def _labelled(polydata, label: int):

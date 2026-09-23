@@ -988,16 +988,19 @@ def test_every_format_the_panel_offers_can_be_written(tmp_path, stub_blobs):
     assert extensions == {".gz", ".stl", ".obj", ".vtk"}
 
 
-def test_a_surface_carries_normals_and_they_agree(tmp_path, stub_blobs):
-    """Two separate defects, and a mesh viewer shows them as one.
+def test_a_surface_is_wound_consistently_and_carries_no_normals(tmp_path, stub_blobs):
+    """Two claims, and the first is the one that was got wrong.
 
-    With no normal array at all a renderer computes one per facet, so the
-    surface reads as faceted however fine it is. And marching cubes plus
-    decimation leaves neighbouring triangles wound in opposite directions, so
-    even once normals exist half of them point inwards and the shading breaks
-    into light and dark patches. `ConsistencyOn` plus `AutoOrientNormalsOn` is
-    what makes them agree; this asserts both, by checking that every facet of
-    a solid cube faces AWAY from its centre.
+    Marching cubes already returns a consistently wound mesh, so every facet
+    of a solid blob faces AWAY from its centre with no orienting filter in
+    the pipeline at all. A `vtkPolyDataNormals` stage was added on the
+    strength of a measurement that appeared to show the winding disagreeing;
+    that measurement was an artefact of `SplittingOn` duplicating points and
+    hiding a third of the shared edges from the metric. Geometry identical,
+    with and without.
+
+    And nothing writes normals: a reader computes them, and the file stays
+    triangles and vertices.
     """
     import numpy as np
     import vtk
@@ -1012,16 +1015,28 @@ def test_a_surface_carries_normals_and_they_agree(tmp_path, stub_blobs):
     reader.Update()
     surface = reader.GetOutput()
 
-    assert surface.GetPointData().GetNormals() is not None, "no point normals"
+    assert surface.GetPointData().GetNormals() is None, "normals were written"
+    assert surface.GetCellData().GetNormals() is None, "cell normals were written"
+
+    # Read the facets' own orientation WITHOUT letting the filter correct it:
+    # consistency and auto-orient off, or this could not tell a well-wound
+    # mesh from one the measurement had just fixed.
+    facing = vtk.vtkPolyDataNormals()
+    facing.SetInputData(surface)
+    facing.ComputeCellNormalsOn()
+    facing.ComputePointNormalsOff()
+    facing.SplittingOff()
+    facing.ConsistencyOff()
+    facing.AutoOrientNormalsOff()
+    facing.Update()
+    oriented = facing.GetOutput()
 
     centres = vtk.vtkCellCenters()
-    centres.SetInputData(surface)
+    centres.SetInputData(oriented)
     centres.Update()
     points = vtk_to_numpy(centres.GetOutput().GetPoints().GetData())
-    facing = vtk_to_numpy(surface.GetCellData().GetNormals())
-    outward = points - points.mean(axis=0)
-    agree = np.sum(outward * facing, axis=1) > 0
-    assert agree.mean() > 0.95, (
-        "%.0f%% of the facets face inwards: the winding is inconsistent"
-        % (100 * (1 - agree.mean()))
+    normals = vtk_to_numpy(oriented.GetCellData().GetNormals())
+    outward = np.sum((points - points.mean(axis=0)) * normals, axis=1) > 0
+    assert outward.mean() > 0.95, (
+        "%.0f%% of the facets face inwards" % (100 * (1 - outward.mean()))
     )
