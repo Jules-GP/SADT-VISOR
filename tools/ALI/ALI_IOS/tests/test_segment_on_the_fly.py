@@ -140,11 +140,12 @@ def crown_seg(failed=(), seen=None):
                     os.path.splitext(os.path.basename(key))[0] + "_Seg.vtk",
                 )
                 write_surface(produced, labelled=True)
-                records[key] = {"status": "segmented", "output": produced}
+                records[key] = {"status": "segmented", "input": key,
+                                "produced": [produced]}
 
         os.makedirs(output_dir, exist_ok=True)
         with open(os.path.join(output_dir, "run_report.json"), "w", encoding="utf-8") as handle:
-            json.dump({"tool": "Crown_Seg", "meshes": records}, handle)
+            json.dump({"tool": "Crown_Seg", "cases": records}, handle)
         return output_dir
 
     return make

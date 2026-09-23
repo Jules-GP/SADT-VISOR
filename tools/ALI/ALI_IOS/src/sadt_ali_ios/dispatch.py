@@ -243,7 +243,8 @@ def _segment(sup, meshes: list, model_path: str, device: str, work_dir: str) -> 
     labelled, failed = [], {}
     for _path, key in meshes:
         record = records.get(key) or {}
-        output = record.get("output")
+        produced_files = record.get("produced") or []
+        output = produced_files[0] if produced_files else None
         if not output or not os.path.isfile(output):
             # One mesh the segmentation could not label costs that mesh, never
             # the batch: the rest of the cohort is still worth an hour of GPU.
@@ -274,7 +275,7 @@ def _crown_records(output_dir: str) -> dict:
     """
     try:
         with open(os.path.join(output_dir, REPORT_NAME), encoding="utf-8") as handle:
-            return json.load(handle).get("meshes") or {}
+            return json.load(handle).get("cases") or {}
     except (OSError, ValueError):
         logger.warning("'%s' wrote no readable run report", CROWN_TOOL)
         return {}
