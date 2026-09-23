@@ -1061,3 +1061,54 @@ def test_the_default_keeps_every_triangle_marching_cubes_made(tmp_path, stub_blo
         return reader.GetOutput().GetNumberOfCells()
 
     assert cells(default) > cells(asked), "the default is decimating something"
+
+
+def test_a_surface_does_not_keep_the_voxel_staircase():
+    """`FeatureEdgeSmoothingOn` preserves edges sharper than the feature
+    angle, and on a raw marching-cubes mesh every voxel step is one -- so it
+    protected the staircase it was there to remove. A sphere has no genuine
+    edge, so anything left is the staircase.
+    """
+    import numpy as np
+    import SimpleITK as sitk
+    import vtk
+    from vtk.util.numpy_support import vtk_to_numpy
+    from sadt_batchdentalseg import mesh_export
+
+    size, radius, spacing = 48, 14, 0.33
+    z, y, x = np.mgrid[0:size, 0:size, 0:size]
+    ball = (((z - 24) ** 2 + (y - 24) ** 2 + (x - 24) ** 2) < radius ** 2)
+    reference = sitk.GetImageFromArray(ball.astype(np.uint8))
+    reference.SetSpacing((spacing, spacing, spacing))
+
+    surface = mesh_export._surface(ball, reference, 30, 0)
+
+    facets = vtk.vtkPolyDataNormals()
+    facets.SetInputData(surface)
+    facets.ComputeCellNormalsOn()
+    facets.ComputePointNormalsOff()
+    facets.SplittingOff()
+    facets.ConsistencyOn()
+    facets.Update()
+    built = facets.GetOutput()
+    normals = vtk_to_numpy(built.GetCellData().GetNormals())
+
+    angles = []
+    for index in range(built.GetNumberOfCells()):
+        cell = built.GetCell(index)
+        for edge in range(cell.GetNumberOfEdges()):
+            ends = cell.GetEdge(edge)
+            neighbours = vtk.vtkIdList()
+            built.GetCellEdgeNeighbors(
+                index, ends.GetPointId(0), ends.GetPointId(1), neighbours)
+            for k in range(neighbours.GetNumberOfIds()):
+                other = neighbours.GetId(k)
+                if other > index:
+                    angles.append(np.degrees(np.arccos(
+                        np.clip(np.dot(normals[index], normals[other]), -1, 1))))
+
+    # 12.9 degrees with the flag on, 3.9 with it off, on a real tooth.
+    assert np.mean(angles) < 8.0, (
+        "mean angle between adjacent facets is %.1f degrees: the staircase is "
+        "still there" % np.mean(angles)
+    )

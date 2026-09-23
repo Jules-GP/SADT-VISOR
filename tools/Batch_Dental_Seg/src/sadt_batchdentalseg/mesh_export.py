@@ -91,7 +91,20 @@ def _surface(mask, reference, smoothing: int, decimation: int):
         smoother.SetNumberOfIterations(max(0, int(smoothing)))
         smoother.SetPassBand(0.05)
         smoother.BoundarySmoothingOn()
-        smoother.FeatureEdgeSmoothingOn()
+        # OFF, and this one line was the whole difference in how the result
+        # looked. Feature-edge smoothing PRESERVES edges sharper than the
+        # feature angle -- and on a raw marching-cubes mesh every voxel step
+        # is such an edge, so the filter was carefully protecting the exact
+        # staircase it was there to remove. Measured on one real canine at
+        # 0.33 mm: the mean angle between adjacent facets goes 12.9 -> 3.9
+        # degrees, and the surface moves CLOSER to the one the module this
+        # replaces produces, 0.051 -> 0.028 mm. Smoother and more faithful at
+        # once, which is what says it was a mistake rather than a trade.
+        #
+        # It was copied from that module, where it is applied to a surface
+        # Slicer has already smoothed and there is no staircase left for it
+        # to protect. Harmless there, backwards here.
+        smoother.SetFeatureEdgeSmoothing(False)
         smoother.NonManifoldSmoothingOn()
         smoother.NormalizeCoordinatesOn()
         smoother.Update()
