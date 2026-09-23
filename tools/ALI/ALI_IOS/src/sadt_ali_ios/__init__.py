@@ -34,6 +34,13 @@ PREDICTION_ID = "Pred"
 # patient whatever follows it.
 OUTPUT_SUFFIXES = ("_lm_Pred", "_lm")
 
+# What a reader may do with what this engine produced, and therefore whether a
+# stop after a call to it is somewhere to come BACK to. Landmarks are dragged
+# and saved back to their own file, which is the whole reason a reader is shown
+# them: an orientation computed from a bad point cannot be fixed where it is
+# looked at.
+REVIEW_KIND = "landmarks"
+
 
 def run(
     input: Path,

@@ -473,6 +473,104 @@ REVIEW_VIEW = "view"
 REVIEW_KINDS = (REVIEW_VIEW, "landmarks", "registration")
 
 
+# Which argument holds one entry per case, so a caller can hand this tool a
+# SUBSET of them.
+CASE_INPUT = "CASE_INPUT"
+
+
+def case_input(src_dir, arguments):
+    """The argument whose folder holds one entry per case, or "".
+
+    **What it is for.** A reader who marked three patients of forty wants
+    those three done again and the other thirty-seven left alone. Doing that
+    means handing the tool fewer inputs -- and which argument to narrow is
+    something no caller can work out: it is `input` here, `scans` there,
+    `meshes` elsewhere, and a registration tool has TWO. A server guessing it
+    would be guessing about every tool it serves.
+
+    So the tool says, beside the signature it belongs to:
+
+        CASE_INPUT = "scans"
+
+    Absent is the ordinary case and means "cannot be narrowed": the replay is
+    then the whole cohort, which is slower and never wrong. That is the
+    direction to fail in -- narrowing the wrong argument would silently drop
+    patients from a run.
+    """
+    for path in sorted(Path(src_dir).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as error:
+            raise SchemaError("{}: {}".format(path, error))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if CASE_INPUT not in [t.id for t in node.targets
+                                  if isinstance(t, ast.Name)]:
+                continue
+            if not isinstance(node.value, ast.Constant) or not isinstance(
+                    node.value.value, str):
+                raise SchemaError(
+                    "{}:{}: {} must be a string literal.".format(
+                        path.name, node.lineno, CASE_INPUT))
+            named = node.value.value
+            if named not in arguments:
+                raise SchemaError(
+                    "{}:{}: {} names {!r}, which run() does not take.".format(
+                        path.name, node.lineno, CASE_INPUT, named))
+            return named
+    return ""
+
+
+# What a reader may DO with what this tool produced, and therefore whether a
+# stop after a call to it is somewhere to come BACK to.
+REVIEW_KIND = "REVIEW_KIND"
+
+
+def review_kind(src_dir):
+    """What a reader may do with this tool's output, or "" if it says nothing.
+
+    **Why a tool declares this about ITSELF.** A checkpoint declared mid-run
+    carries its own kind -- `sup.declareQualityControl("lm", kind=...)` says
+    it on the spot. But most stops are the boundary after a CALL, named after
+    the callee, and nothing at that call site knows whether what came back can
+    be edited. The caller did not write it.
+
+    The tool that WROTE it did. ALI produces landmarks wherever it is called
+    from; ASO produces an orientation. So the fact belongs beside the code
+    that writes the files, exactly as `OUTPUT_SUFFIXES` does, and the server
+    composes `ASO/ALI_CBCT`'s kind out of ALI_CBCT's own declaration.
+
+    Declared as a module-level string literal anywhere under `src/`:
+
+        REVIEW_KIND = "landmarks"
+
+    Absent is the ordinary case and reads as `view`: a tool that says nothing
+    never offers a reader a way back to it, which is the conservative
+    direction.
+    """
+    for path in sorted(Path(src_dir).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as error:
+            raise SchemaError("{}: {}".format(path, error))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if REVIEW_KIND not in [t.id for t in node.targets
+                                   if isinstance(t, ast.Name)]:
+                continue
+            if (not isinstance(node.value, ast.Constant)
+                    or node.value.value not in REVIEW_KINDS):
+                raise SchemaError(
+                    "{}:{}: {} must be one of {}. Got {}.".format(
+                        path.name, node.lineno, REVIEW_KIND,
+                        ", ".join(REVIEW_KINDS), ast.dump(node.value)[:60])
+                )
+            return node.value.value
+    return ""
+
+
 # What a tool appends to the name of what it was given. ASO hands back
 # `P1_Or.nii.gz` for the `P1.nii.gz` it received; ALI hands back
 # `P1_lm_Pred.mrk.json`.
@@ -1012,6 +1110,12 @@ def main(argv=None):
         suffixes = output_suffixes(src_dir)
         if suffixes:
             schema["output_suffixes"] = suffixes
+        kind = review_kind(src_dir)
+        if kind:
+            schema["review_kind"] = kind
+        narrows = case_input(src_dir, schema.get("arguments") or {})
+        if narrows:
+            schema["case_input"] = narrows
         schema["source_hash"] = source_hash(src_dir)
     except SchemaError as error:
         sys.stderr.write("{}: {}\n".format(tool_dir.name, error))
