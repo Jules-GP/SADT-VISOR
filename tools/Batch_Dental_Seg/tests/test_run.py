@@ -21,7 +21,7 @@ from sadt_batchdentalseg.errors import ToolInputError
 
 
 def segmentation_files(report):
-    return [path for scan in report["scans"] for path in scan.get("segmentations", [])]
+    return [path for scan in report["cases"].values() for path in scan.get("produced", [])]
 
 
 def _write_scan(path: str, size=(8, 8, 8), value: int = 40) -> str:
@@ -395,7 +395,7 @@ def test_an_unreadable_scan_does_not_lose_the_others(tmp_path, stub_nnunet, monk
         input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
     )
 
-    statuses = {entry["input"]: entry["status"] for entry in report["scans"]}
+    statuses = {entry["input"]: entry["status"] for entry in report["cases"].values()}
     assert statuses == {"p1.nii.gz": "ok", "p2.nii.gz": "failed"}
     assert report["summary"] == "1/2 scan(s) segmented"
     assert len(segmentation_files(report)) == 1

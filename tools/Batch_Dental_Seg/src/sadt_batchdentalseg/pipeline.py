@@ -307,7 +307,7 @@ def segment(
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
 
-    report_scans = list(failed_conversions)
+    report_cases = {entry["case_id"]: entry for entry in failed_conversions}
     for index, (case_id, scan) in enumerate(cases.items(), start=1):
         progress.report(index, len(cases), "writing scan", start=0.9)
         entry = {"case_id": case_id, "input": _describe(scan)}
@@ -316,7 +316,7 @@ def segment(
             # Reported per scan rather than raised: one unreadable patient in a
             # cohort of forty must not lose the other thirty-nine.
             entry.update(status="failed", error="nnUNet produced no output for this scan")
-            report_scans.append(entry)
+            report_cases[case_id] = entry
             continue
 
         try:
@@ -351,14 +351,15 @@ def segment(
                 labels, model, base, scan_output_dir, prediction_ID,
                 export_formats, decimation=surface_decimation,
             ))
-            entry.update(status="ok", segmentations=produced)
+            entry.update(status="ok", produced=produced)
         except Exception as exc:  # noqa: BLE001 - one bad scan must not end the batch
             logger.exception("BatchDentalSeg: scan failed")
             entry.update(status="failed", error=f"{type(exc).__name__}: {exc}")
 
-        report_scans.append(entry)
+        report_cases[case_id] = entry
 
-    succeeded = [entry for entry in report_scans if entry.get("status") == "ok"]
+    succeeded = [entry for entry in report_cases.values()
+                 if entry.get("status") == "ok"]
     report = {
         "tool": TOOL_NAME,
         "model": model.name,
@@ -380,8 +381,8 @@ def segment(
         # able to see how much of it was thrown away.
         "export_formats": list(export_formats),
         "surface_decimation": int(surface_decimation),
-        "scans": report_scans,
-        "summary": f"{len(succeeded)}/{len(report_scans)} scan(s) segmented",
+        "cases": report_cases,
+        "summary": f"{len(succeeded)}/{len(report_cases)} scan(s) segmented",
         "duration_seconds": round(time.monotonic() - started, 2),
     }
 
