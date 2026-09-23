@@ -317,7 +317,7 @@ def _unprocessed(key: str, reason: str) -> dict:
         "landmarks_found": [],
         "landmarks_failed": {},
         "jaws_without_model": {},
-        "files": [],
+        "produced": [],
         "duration_seconds": 0.0,
     }
 
@@ -325,7 +325,7 @@ def _unprocessed(key: str, reason: str) -> dict:
 def _merge(reports: list) -> dict:
     """The two passes' reports as one.
 
-    Only `scans` is genuinely merged. Everything else -- the mode, the device,
+    Only `cases` is genuinely merged. Everything else -- the mode, the device,
     the networks the bundle could serve, the checkpoints it could not read --
     is a property of the BUNDLE and the request, identical in both passes, so
     it is taken from the first rather than combined into a list that would
@@ -333,10 +333,10 @@ def _merge(reports: list) -> dict:
     recomputed by the caller over the whole run.
     """
     merged = dict(reports[0])
-    scans = {}
+    cases = {}
     for report in reports:
-        scans.update(report["scans"])
-    merged["scans"] = scans
+        cases.update(report["cases"])
+    merged["cases"] = cases
     return merged
 
 
@@ -360,9 +360,9 @@ def _keep_only(report: dict, landmarks) -> None:
     have written, control-point ids included.
     """
     wanted = set(landmarks)
-    for record in report.get("scans", {}).values():
+    for record in report.get("cases", {}).values():
         kept_files = []
-        for path in record.get("files", []):
+        for path in record.get("produced", []):
             if _filter_markups(path, wanted):
                 kept_files.append(path)
             else:
@@ -372,7 +372,7 @@ def _keep_only(report: dict, landmarks) -> None:
                 # went wrong; the scan's own record is where "nothing here"
                 # belongs.
                 os.remove(path)
-        record["files"] = kept_files
+        record["produced"] = kept_files
         record["landmarks_found"] = [
             label for label in record.get("landmarks_found", []) if label in wanted
         ]
@@ -592,12 +592,12 @@ def identify(
         # wrote it -- it says which passes actually ran, which is a fact about
         # the run rather than a selection.
         for key, reason in sorted(segmentation_failures.items()):
-            report["scans"][key] = _unprocessed(key, reason)
-        processed = sum(1 for record in report["scans"].values() if record["status"] == "ok")
+            report["cases"][key] = _unprocessed(key, reason)
+        processed = sum(1 for record in report["cases"].values() if record["status"] == "ok")
         report["summary"] = {
-            "total": len(report["scans"]),
+            "total": len(report["cases"]),
             "processed": processed,
-            "failed": len(report["scans"]) - processed,
+            "failed": len(report["cases"]) - processed,
         }
         # Which meshes did not arrive ready, by key. Always present, so a client
         # reads one field rather than testing whether it exists: empty is the

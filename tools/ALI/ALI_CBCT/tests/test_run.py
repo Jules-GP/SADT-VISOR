@@ -630,7 +630,7 @@ def test_the_report_tells_a_missing_model_from_a_failed_search(
     )
     report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
 
-    scan = report["scans"]["patient01.nii.gz"]
+    scan = report["cases"]["patient01.nii.gz"]
     assert scan["landmarks_found"] == ["Ba"]
     assert "S" in report["landmarks_without_model"]
     assert report["landmarks_ungrouped"] == ["XBa"]
@@ -662,11 +662,11 @@ def test_a_landmark_that_never_converges_does_not_cost_the_others(
         del cbct_catalog.LABEL_GROUPS["XN"]
 
     report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
-    scan = report["scans"]["patient01.nii.gz"]
+    scan = report["cases"]["patient01.nii.gz"]
     assert scan["status"] == "ok"
     assert scan["landmarks_found"] == ["Ba"]
     assert "XN" in scan["landmarks_failed"]
-    assert scan["files"]
+    assert scan["produced"]
 
 
 def test_the_run_report_lands_beside_the_results(tmp_path, stub_agent, cbct_environment):
@@ -956,7 +956,7 @@ def test_the_real_cbct_bundle_places_landmarks_on_a_real_scan(tmp_path):
     assert len(produced) == 1
     points = json.loads(produced[0].read_text())["markups"][0]["controlPoints"]
     found = {point["label"]: point["position"] for point in points}
-    assert set(found) == set(wanted), report["scans"]
+    assert set(found) == set(wanted), report["cases"]
 
     # Inside the scan's own physical extent, which is the cheap check that
     # catches a coordinate convention going wrong -- the failure mode that
