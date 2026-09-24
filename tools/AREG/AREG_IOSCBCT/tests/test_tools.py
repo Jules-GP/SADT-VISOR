@@ -119,8 +119,11 @@ def test_the_cbct_landmarks_are_asked_for_by_name_not_by_region(tmp_path):
     params = sup.asked("ALI_CBCT")
     assert params["landmarks"] == list(tools.CBCT_LANDMARKS)
     assert "regions" not in params
-    assert params["prediction_ID"] == "Pred"
     assert params["model"] == "/models/ali"
+    # NOT sent, and asserted rather than simply dropped: ALI fixed its marker
+    # at `Pred` precisely because a caller that moved it made the output file
+    # name unpredictable. Sending it again is an unexpected keyword now.
+    assert "prediction_ID" not in params
 
 
 def test_the_twelve_cbct_landmarks_are_three_per_quadrant():
@@ -146,8 +149,8 @@ def test_the_intraoral_request_asks_for_the_occlusal_family_alone(tmp_path):
 
     params = sup.asked("ALI_IOS")
     assert params["networks"] == ["Occlusal"]
-    assert params["prediction_ID"] == "Pred"
     assert "model" not in params
+    assert "prediction_ID" not in params
 
 
 def test_the_orientation_request_is_asos_fully_automated_cbct_mode(tmp_path):

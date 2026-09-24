@@ -760,9 +760,14 @@ def test_the_landmark_request_asks_for_mucogingival_alone(tmp_path):
     tool, params = sup.calls[0]
     assert tool == "ALI_IOS"
     assert params["networks"] == ["Mucogingival"]
-    assert params["prediction_ID"] == "MG_Pred"
     # Not named, so ALI picks the bundle matching the input itself.
     assert "model" not in params
+    # NOT sent. This test and the caller beside it agreed with each other and
+    # not with ALI, which is why the suite stayed green while the call could
+    # only ever have failed: ALI fixed its marker at `Pred` and refuses the
+    # argument now. A test that pins a contract the callee has dropped is
+    # worse than no test -- it reports health.
+    assert "prediction_ID" not in params
 
 
 # Moved from the single AREG suite when AREG became three tools. These drive

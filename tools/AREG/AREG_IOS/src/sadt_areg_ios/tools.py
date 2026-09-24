@@ -159,7 +159,12 @@ def predict_mucogingival(sup, mesh_dir: str, model_path: str = "") -> str:
         # only ever applied to one modality stopped needing the prefix that told
         # them apart.
         "networks": ["Mucogingival"],
-        "prediction_ID": "MG_Pred",
+        # No `prediction_ID` either, and for a third time the same reason: ALI
+        # fixed its marker at `Pred` because a caller that moved it made the
+        # output file name unpredictable -- nothing downstream could then find
+        # the landmarks it had just asked for. Passing it fails on an
+        # unexpected keyword. This call kept it three days longer than its
+        # siblings because no test here reads the parameters it sends.
     }
     if model_path:
         parameters["model"] = model_path
