@@ -12,10 +12,10 @@ requires-python = ">=3.11,<3.12"
 # until they were written for the server in `mesh_export.py`. It pulls no
 # torch of its own, so it cannot shadow the image's CUDA build.
 dependencies = [
-    # The file-format vocabulary: which extensions are a volume, a surface, a
-    # markups file. A DIRECT dependency, not merely a `tool.uv.sources` entry:
+    # The naming vocabulary every tool must agree on: extensions, output
+    # markers, jaw and timepoint tokens. A DIRECT dependency, not merely a `tool.uv.sources` entry:
     # a source only applies to a package that is actually depended on.
-    "sadt-formats",
+    "sadt-naming",
     "torch==2.8.0",
     "nnunetv2==2.8.1",
     "SimpleITK==2.5.6",
@@ -58,7 +58,7 @@ explicit = true
 # internal helper -- see CONTRIBUTING.md, and the `.stl` ALI advertised and
 # never read. It has no dependencies of its own and cannot perturb the
 # resolution above.
-sadt-formats = { path = "../../formats" }
+sadt-naming = { path = "../../naming" }
 # Development only: lets this tool's tests run ANOTHER tool through that tool's
 # own venv, as a subprocess, the way the server does. It has no dependencies of
 # its own, so it cannot perturb the resolution above. Never move it into

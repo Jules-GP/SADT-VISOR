@@ -586,7 +586,7 @@ are copied between tools on purpose.
 the one drawn above: a helper is internal and may drift without anyone being
 misled, while a contract is what the outside world sees. Two exist.
 `tools/<family>/common/` holds what one family must not disagree about, and
-`formats/` (`sadt-formats`) holds the file-format vocabulary -- which
+`naming/` (`sadt-naming`) holds the file-format vocabulary -- which
 extensions are a volume, a surface, a markups file -- because that is a
 property of NIfTI and VTK rather than of any tool, and duplicating it is what
 let ALI advertise `.stl` and silently ignore it. Before it existed there were

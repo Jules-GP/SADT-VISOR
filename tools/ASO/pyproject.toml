@@ -7,10 +7,10 @@ description = "Orient CBCT scans or intra-oral scans onto a standard reference f
 # further: this is the one migrated tool with no torch in it.
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    # The file-format vocabulary: which extensions are a volume, a surface, a
-    # markups file. A DIRECT dependency, not merely a `tool.uv.sources` entry:
+    # The naming vocabulary every tool must agree on: extensions, output
+    # markers, jaw and timepoint tokens. A DIRECT dependency, not merely a `tool.uv.sources` entry:
     # a source only applies to a package that is actually depended on.
-    "sadt-formats",
+    "sadt-naming",
     "SimpleITK==2.5.6",
     "vtk==9.6.2",
     "numpy==2.3.2",
@@ -48,7 +48,7 @@ packages = ["src/sadt_aso"]
 # internal helper -- see CONTRIBUTING.md, and the `.stl` ALI advertised and
 # never read. It has no dependencies of its own and cannot perturb the
 # resolution above.
-sadt-formats = { path = "../../formats" }
+sadt-naming = { path = "../../naming" }
 # Development only: lets this tool's tests run ANOTHER tool through that tool's
 # own venv, as a subprocess, the way the server does -- which is how the
 # supervisor is exercised end to end. It has no dependencies of its own, so it

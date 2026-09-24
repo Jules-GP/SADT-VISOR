@@ -39,7 +39,7 @@ from .catalog import (
     STRUCTURE_CODES,
 )
 from .errors import ToolInputError
-from sadt_formats import (VOLUME as SCAN_EXTENSIONS, compressed_extension,
+from sadt_naming import (VOLUME as SCAN_EXTENSIONS, compressed_extension,
                           split_extension as split_scan_extension)
 
 logger = logging.getLogger(__name__)
