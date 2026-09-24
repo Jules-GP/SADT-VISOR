@@ -297,7 +297,7 @@ def orient_patient(
     rather than once per patient; without one, each call gets a fresh cache and
     still avoids re-reading a patient's own mesh.
     """
-    entry: dict = {"status": "ok", "jaws": {}, "outputs": []}
+    entry: dict = {"status": "ok", "jaws": {}, "produced": []}
     matrices: dict = {}
     cache = cache if cache is not None else FileCache()
 
@@ -341,7 +341,7 @@ def orient_patient(
                           else "landmarks")
                 ),
             }
-            entry["outputs"].extend(written)
+            entry["produced"].extend(written)
     finally:
         # This patient's meshes are of no further use, and the next one's are
         # the same size. Released even when a jaw raised something unexpected.
@@ -353,7 +353,7 @@ def orient_patient(
             f"{jaw}: {detail.get('reason', detail['status'])}"
             for jaw, detail in entry["jaws"].items()
         ) or "no jaw could be oriented"
-    entry["outputs"].sort()
+    entry["produced"].sort()
     return entry
 
 
