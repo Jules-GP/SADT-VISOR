@@ -18,6 +18,7 @@ import re
 
 import numpy as np
 import SimpleITK as sitk
+import sadt_naming
 
 from .. import catalogs, markups
 from . import icp as ios_icp
@@ -29,10 +30,12 @@ logger = logging.getLogger(__name__)
 # the substring "upper", and DEFAULTED TO LOWER when neither was found -- so a
 # maxillary scan named `patient1.vtk` was quietly registered against the
 # mandibular reference and returned as a success.
-_JAW_TOKENS = {
-    "u": "Upper", "up": "Upper", "upper": "Upper", "maxilla": "Upper", "max": "Upper",
-    "l": "Lower", "low": "Lower", "lower": "Lower", "mandible": "Lower", "mand": "Lower",
-}
+#
+# Shared, not local, and that is a widening: this tool knew ten spellings and
+# its neighbours knew thirteen and four, so `P1_MX.vtk` was read by AREG and
+# refused HERE. A clinician cannot be expected to know which tool learnt which
+# word. Nothing that worked stops working -- the table is the union.
+_JAW_TOKENS = sadt_naming.JAW_TOKENS
 
 _SPLIT = re.compile(r"[_\-.]+")
 

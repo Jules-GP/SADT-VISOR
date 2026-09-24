@@ -41,7 +41,7 @@ import shutil
 from . import catalogs
 from . import markups
 from . import progress
-from .scans import split_scan_extension
+from sadt_naming import split_extension as split_scan_extension
 from .cbct import dicom
 from .cbct import pipeline as cbct_pipeline
 from .errors import SupervisorRequired, ToolInputError

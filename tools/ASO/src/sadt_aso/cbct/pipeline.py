@@ -19,7 +19,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from .. import markups
-from ..scans import SCAN_EXTENSIONS, compressed_extension
+from sadt_naming import VOLUME as SCAN_EXTENSIONS, compressed_extension
 from . import icp
 
 logger = logging.getLogger(__name__)
